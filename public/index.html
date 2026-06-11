@@ -164,9 +164,10 @@
           <input id="file" type="file" accept=".csv,text/csv" class="hidden" />
           <p class="hint">
             One restaurant name per row, with a header. <strong>Any column name
-            works</strong> — we auto-detect <code>query</code> / <code>name</code> /
-            <code>restaurant</code>, otherwise the first column is used. Extra
-            columns are kept in the output.
+            works</strong> — we auto-detect the query column, otherwise the first
+            column is used. If several match, the priority is
+            <code>query</code> → <code>restaurant</code> → <code>name</code>.
+            Extra columns are kept in the output.
             <a id="tmpl">⬇ Download a template CSV</a>
           </p>
         </div>

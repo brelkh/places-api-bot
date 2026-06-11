@@ -24,9 +24,10 @@ CSV; the CLI reads `restaurants.csv` and writes `restaurant_status.csv`.
    uploaded, so the file is never sent on a wrong password.
 2. **Choose or drag in a CSV** of restaurant names. It needs a header row and
    one name per line; **any column name works** — the query column is
-   auto-detected (`query`, `restaurant`, `name`, … — otherwise the first
-   column). Extra columns are kept and passed straight through. Not sure of the
-   format? Click **Download a template CSV** and fill it in.
+   auto-detected, otherwise the first column is used. If several match, the
+   priority is `query` → `restaurant` → `name` (so a file with both `query` and
+   `name` uses `query`). Extra columns are kept and passed straight through. Not
+   sure of the format? Click **Download a template CSV** and fill it in.
 3. **Tick the information you want** (status, matched name, address, Maps link,
    coordinates, category…). Every option is in the same **Pro** price tier, so
    selecting more never moves you into a pricier tier. Business status is always
@@ -100,9 +101,10 @@ python -m places_bot --input restaurants.csv --output restaurant_status.csv
 
 ### Input format
 
-A CSV with a header row. The query column is auto-detected (it looks for a
-column named `query`, `restaurant`, `restaurant_name`, or `name`, otherwise it
-uses the first column). Override with `--query-column`. Any extra columns you
+A CSV with a header row. The query column is auto-detected by **priority**:
+`query` → `restaurant` → `restaurant_name` → `name`; if none match, the first
+column is used. So when more than one matches (e.g. both `query` and `name`),
+`query` wins. Override with `--query-column` (CLI only). Any extra columns you
 include are carried through to the output untouched.
 
 ```csv
