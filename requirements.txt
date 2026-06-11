@@ -1,1 +1,3 @@
 requests>=2.31.0
+# Web app (Vercel serverless function) only — the CLI needs just `requests`.
+flask>=3.0

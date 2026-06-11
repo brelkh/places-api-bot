@@ -95,6 +95,51 @@ bot against a committed CSV and uploads `restaurant_status.csv` as an artifact.
 Add your key under **Settings → Secrets and variables → Actions** as
 `GOOGLE_MAPS_API_KEY`, then trigger it from the **Actions** tab.
 
+## Web app (Vercel)
+
+A browser version lives in [`public/index.html`](public/index.html) (the UI) and
+[`api/process.py`](api/process.py) (a Flask serverless function that reuses the
+same `places_bot` engine). Upload a CSV, get a results table, download the
+output CSV — no terminal needed.
+
+```
+public/index.html   clean single-page UI (upload → results table → download)
+api/process.py      serverless function: password gate → lookups → JSON + CSV
+vercel.json         bundles the places_bot package with the function
+```
+
+The function looks up statuses **concurrently** (`PLACES_MAX_WORKERS`, default 8)
+so a CSV finishes inside the request timeout, and your API key never leaves the
+server.
+
+### Deploy
+
+1. Push this repo to GitHub and import it at [vercel.com/new](https://vercel.com/new)
+   (no build settings needed — Vercel detects `public/` and `api/`).
+2. In **Project → Settings → Environment Variables**, add:
+   - `GOOGLE_MAPS_API_KEY` — your Places API key
+   - `APP_PASSWORD` — the shared password you give your team
+   - *(optional)* `MAX_ROWS` (default `750`), `PLACES_MAX_WORKERS` (default `8`)
+3. Deploy. Share the URL + the password with your team.
+
+Because it scales to zero, it costs nothing when idle; you only pay Google for
+the Places API calls.
+
+### Run the web app locally
+
+```bash
+pip install -r requirements.txt
+export GOOGLE_MAPS_API_KEY="your-key" APP_PASSWORD="local-pass"
+python api/process.py            # serves the API on http://localhost:5000
+```
+
+(For the full static-UI + function experience, `npm i -g vercel` then `vercel dev`.)
+
+### Limits
+
+`MAX_ROWS` caps a single upload (default 750) so a request can't outrun Vercel's
+60s timeout. For bigger batches, split the file or use the CLI locally.
+
 ## Tests
 
 ```bash
@@ -106,6 +151,6 @@ Tests stub the network, so no API key or quota is consumed.
 
 ## Roadmap
 
-- [ ] Host as a cheap web app with a clean upload-and-download UI
-- [ ] Friendlier flow for non-technical users
+- [x] Host as a cheap web app with a clean upload-and-download UI
+- [ ] Friendlier flow for non-technical users (e.g. per-user keys, saved jobs)
 - [ ] Tighter quota dashboards / alerting

@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import config, processor
-from .client import PlacesAPIError, PlacesClient
+from . import config, processor, service
+from .client import PlacesClient
 from .usage import UsageTracker
 
 
@@ -115,11 +115,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"Using '{query_col}' as the query column.", file=sys.stderr)
 
-    # Work out the unique queries so we can both estimate cost and dedupe.
-    def full_query(row: dict[str, str]) -> str:
-        return f"{(row.get(query_col) or '').strip()}{args.suffix}"
-
-    queries = [full_query(r) for r in rows if (r.get(query_col) or "").strip()]
+    # Work out the unique queries so we can estimate cost before running.
+    queries = [
+        service.full_query(r.get(query_col) or "", args.suffix)
+        for r in rows
+        if (r.get(query_col) or "").strip()
+    ]
     unique_queries = list(dict.fromkeys(queries))
     planned_calls = len(queries) if args.no_dedupe else len(unique_queries)
 
@@ -134,35 +135,27 @@ def main(argv: list[str] | None = None) -> int:
         language_code=args.language_code,
     )
 
-    cache: dict[str, dict[str, str]] = {}
-    calls_made = 0
     total = len(rows)
+    progress = {"n": 0}
 
-    for idx, row in enumerate(rows, start=1):
-        raw_query = (row.get(query_col) or "").strip()
-        if not raw_query:
-            row.update(processor.error_summary("empty query"))
-            continue
-
-        query = full_query(row)
-        if not args.no_dedupe and query in cache:
-            row.update(cache[query])
-            continue
-
-        try:
-            places = client.search_text(query)
-            calls_made += 1
-            summary = processor.summarize_places(places)
-        except PlacesAPIError as exc:
-            calls_made += 1  # the call was attempted/charged
-            summary = processor.error_summary(str(exc))
-
-        cache[query] = summary
-        row.update(summary)
+    def on_result(row: dict[str, str]) -> None:
+        progress["n"] += 1
+        raw_query = (row.get(query_col) or "").strip() or "(empty)"
         print(
-            f"  [{idx}/{total}] {raw_query} -> {summary['business_status_label']}",
+            f"  [{progress['n']}/{total}] {raw_query} -> "
+            f"{row['business_status_label']}",
             file=sys.stderr,
         )
+
+    calls_made = service.lookup_statuses(
+        rows,
+        query_col,
+        suffix=args.suffix,
+        client=client,
+        dedupe=not args.no_dedupe,
+        max_workers=1,  # sequential keeps CLI progress output in order
+        on_result=on_result,
+    )
 
     try:
         processor.write_rows(args.output, fieldnames, rows)

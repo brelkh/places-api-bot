@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 from typing import Any, Iterable
 
 # Google Maps' raw businessStatus values -> friendly labels.
@@ -77,27 +78,49 @@ def error_summary(message: str) -> dict[str, str]:
     }
 
 
-def read_rows(input_path: str) -> tuple[list[str], list[dict[str, str]]]:
-    """Return (fieldnames, rows) from the input CSV."""
-    with open(input_path, newline="", encoding="utf-8-sig") as fh:
-        reader = csv.DictReader(fh)
-        if reader.fieldnames is None:
-            raise ValueError(f"{input_path} appears to be empty.")
-        fieldnames = list(reader.fieldnames)
-        rows = [dict(row) for row in reader]
+def output_fieldnames(fieldnames: Iterable[str]) -> list[str]:
+    """Input columns plus any OUTPUT_COLUMNS not already present."""
+    out_fields = list(fieldnames)
+    for col in OUTPUT_COLUMNS:
+        if col not in out_fields:
+            out_fields.append(col)
+    return out_fields
+
+
+def read_rows_from_text(text: str) -> tuple[list[str], list[dict[str, str]]]:
+    """Parse CSV text into (fieldnames, rows). Shared by the CLI and web app."""
+    reader = csv.DictReader(io.StringIO(text))
+    if reader.fieldnames is None:
+        raise ValueError("CSV appears to be empty.")
+    fieldnames = list(reader.fieldnames)
+    rows = [dict(row) for row in reader]
     return fieldnames, rows
+
+
+def rows_to_csv(fieldnames: Iterable[str], rows: list[dict[str, str]]) -> str:
+    """Serialise rows to CSV text, appending OUTPUT_COLUMNS that aren't present."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer, fieldnames=output_fieldnames(fieldnames), extrasaction="ignore"
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
+
+
+def read_rows(input_path: str) -> tuple[list[str], list[dict[str, str]]]:
+    """Return (fieldnames, rows) from the input CSV file."""
+    with open(input_path, newline="", encoding="utf-8-sig") as fh:
+        text = fh.read()
+    try:
+        return read_rows_from_text(text)
+    except ValueError:
+        raise ValueError(f"{input_path} appears to be empty.")
 
 
 def write_rows(
     output_path: str, fieldnames: list[str], rows: list[dict[str, str]]
 ) -> None:
-    """Write rows, appending OUTPUT_COLUMNS that aren't already present."""
-    out_fields = list(fieldnames)
-    for col in OUTPUT_COLUMNS:
-        if col not in out_fields:
-            out_fields.append(col)
-
+    """Write rows to a file, appending OUTPUT_COLUMNS that aren't present."""
     with open(output_path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=out_fields, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+        fh.write(rows_to_csv(fieldnames, rows))

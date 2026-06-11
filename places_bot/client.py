@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -25,7 +26,6 @@ class PlacesClient:
         language_code: str = config.DEFAULT_LANGUAGE_CODE,
         max_retries: int = 4,
         timeout: int = 30,
-        session: requests.Session | None = None,
     ) -> None:
         self.api_key = api_key
         self.field_mask = field_mask
@@ -33,7 +33,18 @@ class PlacesClient:
         self.language_code = language_code
         self.max_retries = max_retries
         self.timeout = timeout
-        self.session = session or requests.Session()
+        # One Session per thread. requests.Session isn't guaranteed thread-safe,
+        # and the web app calls search_text concurrently, so we keep sessions
+        # thread-local while still getting connection pooling within a thread.
+        self._local = threading.local()
+
+    @property
+    def _session(self) -> requests.Session:
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._local.session = session
+        return session
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -57,7 +68,7 @@ class PlacesClient:
         last_error: str | None = None
         for attempt in range(self.max_retries):
             try:
-                resp = self.session.post(
+                resp = self._session.post(
                     config.SEARCH_TEXT_URL,
                     headers=self._headers(),
                     json=body,
