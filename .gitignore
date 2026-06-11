@@ -427,3 +427,10 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+## places-api-bot
+.env
+.places_usage.json
+restaurant_status.csv
+.vercel
+node_modules/
