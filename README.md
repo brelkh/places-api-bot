@@ -1,7 +1,7 @@
 # places-api-bot
 
-[![Live demo](https://img.shields.io/badge/Live_demo-Open_app-2563eb?logo=vercel&logoColor=white)](https://places-api-bot-git-claude-nice-meitner-sk537j-brelkhs-projects.vercel.app/)
-[![Deployed on Vercel](https://img.shields.io/badge/Deployed_on-Vercel-000000?logo=vercel&logoColor=white)](https://places-api-bot-git-claude-nice-meitner-sk537j-brelkhs-projects.vercel.app/)
+[![Live demo](https://img.shields.io/badge/Live_demo-Open_app-2563eb?logo=vercel&logoColor=white)](https://places-api-bot.vercel.app/)
+[![Deployed on Vercel](https://img.shields.io/badge/Deployed_on-Vercel-000000?logo=vercel&logoColor=white)](https://places-api-bot.vercel.app/)
 
 Look up the Google Maps **business status** (open / temporarily closed /
 permanently closed) for a list of restaurants — as a **web app** or a **CLI**.
@@ -15,7 +15,7 @@ CSV; the CLI reads `restaurants.csv` and writes `restaurant_status.csv`.
 
 ## Using the web app
 
-**🔗 [Open the app](https://places-api-bot-git-claude-nice-meitner-sk537j-brelkhs-projects.vercel.app/)**
+**🔗 [Open the app](https://places-api-bot.vercel.app/)**
 &nbsp;·&nbsp; ask the project owner for the shared **access password**.
 
 1. **Enter the access password** (set by whoever deployed it, via the
@@ -43,10 +43,6 @@ CSV; the CLI reads `restaurants.csv` and writes `restaurant_status.csv`.
   for unlimited batches.
 - The summary pills show the **row count and number of API calls** — duplicate
   names are looked up only once, so calls ≤ rows.
-
-> The link above is the current preview deployment for this branch. After you
-> merge to `main`, Vercel will also give you a stable production URL you can
-> share instead.
 
 ## How it works
 
