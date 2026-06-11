@@ -172,3 +172,111 @@ def test_verify_rate_limited_after_failures(client):
     resp = client.post("/api/verify", json={"password": "wrong"})
     assert resp.status_code == 429
     assert resp.get_json()["retry_after"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# JSON lookup mode
+# --------------------------------------------------------------------------- #
+def test_json_happy_path(client):
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"queries": ["McDonald's ARC", "Gone Forever"]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert len(body["results"]) == 2
+    assert body["results"][0]["query"] == "McDonald's ARC"
+    assert body["results"][0]["business_status_label"] == "Open"
+    assert body["results"][1]["business_status_label"] == "Permanently closed"
+    assert body["api_calls"] == 2
+    assert body["error_count"] == 0
+    assert body["key_used"] == "the app's key"
+
+
+def test_json_field_selection(client):
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"queries": ["McDonald's ARC"], "fields": ["businessStatus", "location"]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    result = resp.get_json()["results"][0]
+    assert "latitude" in result and "longitude" in result
+    assert "matched_name" not in result  # displayName not selected
+
+
+def test_json_error_reasons(client, monkeypatch):
+    def quota_search(self, query):
+        raise PlacesAPIError("limit", reason="quota")
+
+    monkeypatch.setattr(PlacesClient, "search_text", quota_search)
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"queries": ["Some Place"]},
+        headers={"X-App-Token": token},
+    )
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["error_count"] == 1
+    assert body["error_reasons"].get("quota") == 1
+
+
+def test_json_byo_key_fallback(client, monkeypatch):
+    def boom(api_key, **kw):
+        return PlacesAPIError("bad", reason="auth")
+
+    monkeypatch.setattr(web.service, "probe_key", boom)
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"queries": ["McDonald's ARC"], "api_key": "bad-user-key"},
+        headers={"X-App-Token": token},
+    )
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert "your key failed" in body["key_used"]
+    assert body["key_warning"] and "rejected" in body["key_warning"]
+
+
+def test_json_probe_only_returns_key_info(client):
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"probe_only": True},
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["key_used"] == "the app's key"
+    assert "results" not in body  # no lookup performed
+
+
+def test_json_requires_auth(client):
+    resp = client.post("/api/process", json={"queries": ["McDonald's ARC"]})
+    assert resp.status_code == 401
+
+
+# --- row-counting rate limiter ---
+def test_json_row_counting_rate_limiter(client, monkeypatch):
+    """process limiter counts rows; 429 after budget exhausted."""
+    monkeypatch.setattr(web, "_process_limiter", web.RateLimiter(max_events=5, window_seconds=600))
+    token = _token(client)
+    # 5 rows — exactly at the limit, should be allowed
+    resp = client.post(
+        "/api/process",
+        json={"queries": [f"Place {i}" for i in range(5)]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    # 1 more row — total 6 > 5, should be rejected
+    resp = client.post(
+        "/api/process",
+        json={"queries": ["One More Place"]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 429
+    assert resp.get_json()["retry_after"] > 0

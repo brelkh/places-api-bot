@@ -134,6 +134,10 @@
       .badge.temp { color: var(--temp); background: var(--temp-bg); }
       .badge.perm { color: var(--perm); background: var(--perm-bg); }
       .badge.other { color: var(--other); background: var(--other-bg); }
+      .progress-wrap { margin-top: 16px; }
+      .progress-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px; }
+      .progress-track { background: var(--line); border-radius: 999px; height: 8px; overflow: hidden; }
+      .progress-fill { background: var(--brand); height: 100%; width: 0%; transition: width 0.25s ease; }
       .foot { color: var(--muted); font-size: 13px; margin-top: 26px; text-align: center; }
       .foot code { background: #eef2f7; padding: 1px 6px; border-radius: 5px; }
     </style>
@@ -166,7 +170,7 @@
             One restaurant name per row, with a header. <strong>Any column name
             works</strong> — we auto-detect the query column, otherwise the first
             column is used. If several match, the priority is
-            <code>query</code> → <code>restaurant</code> → <code>name</code>.
+            <code>query</code> → <code>restaurant</code> → <code>restaurant_name</code> → <code>name</code>.
             Extra columns are kept in the output.
             <a id="tmpl">⬇ Download a template CSV</a>
           </p>
@@ -208,6 +212,17 @@
           <span class="spinner hidden" id="spinner"></span>
           <span class="msg" id="status"></span>
         </div>
+
+        <div class="progress-wrap hidden" id="progressWrap">
+          <div class="progress-meta">
+            <span id="progressText" style="font-size:13px;color:var(--muted)"></span>
+            <button id="cancelBtn" type="button" class="ghost"
+              style="font-size:13px;padding:6px 12px">Cancel</button>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+        </div>
       </form>
 
       <section class="card hidden" id="results">
@@ -231,11 +246,28 @@
 
     <script>
       const PREVIEW_LIMIT = 200;
+      const CHUNK_SIZE = 75;
+      const COST_CONFIRM_THRESHOLD = 1000;
+
+      const REASON_TEXT = {
+        quota: "API quota / rate limit exceeded",
+        auth: "API key was rejected",
+        invalid_request: "the request was rejected as invalid",
+        network: "could not reach the Places API",
+        empty: "the row had no restaurant name",
+        unknown: "an unknown error occurred",
+      };
+
+      // Priority order mirrors processor.detect_query_column on the server.
+      const QUERY_CANDIDATES = ["query", "restaurant", "restaurant_name", "name"];
+
       const $ = (id) => document.getElementById(id);
       const fileInput = $("file");
       const drop = $("drop");
       let csvText = "";
       let csvName = "restaurant_status.csv";
+      let cancelled = false;
+      let fieldCatalog = []; // populated from /api/fields
 
       // remember password across reloads (sessionStorage only)
       $("password").value = sessionStorage.getItem("rsl_pw") || "";
@@ -244,6 +276,7 @@
       fetch("/api/fields")
         .then((r) => r.json())
         .then((data) => {
+          fieldCatalog = data.fields;
           const box = $("checks");
           box.innerHTML = "";
           data.fields.forEach((f) => {
@@ -265,6 +298,20 @@
 
       function selectedFields() {
         return [...document.querySelectorAll("#checks input:checked")].map((c) => c.value);
+      }
+
+      // Compute output field columns from the catalog — mirrors resolve_fields + field_columns.
+      function getOutputFieldColumns() {
+        const selected = new Set(selectedFields());
+        const cols = [];
+        for (const f of fieldCatalog) {
+          if (selected.has(f.id)) {
+            for (const c of f.columns) {
+              if (!cols.includes(c)) cols.push(c);
+            }
+          }
+        }
+        return cols;
       }
 
       // --- "Select all" master toggle (excludes the locked business-status box) ---
@@ -311,27 +358,140 @@
         );
       });
 
-      function badgeClass(label) {
-        const l = (label || "").toLowerCase();
-        if (l === "open") return "open";
-        if (l.startsWith("temporarily")) return "temp";
-        if (l.startsWith("permanently")) return "perm";
-        return "other";
+      // --- cancel button ---
+      $("cancelBtn").addEventListener("click", () => { cancelled = true; });
+
+      // --------------------------------------------------------------------------
+      // RFC 4180-compliant CSV parser
+      // Handles: quoted fields with embedded commas/newlines, "" escape, CRLF, BOM.
+      // --------------------------------------------------------------------------
+      function parseCSV(text) {
+        // Strip UTF-8 BOM if present.
+        if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+
+        const rows = [];
+        let i = 0;
+        const n = text.length;
+
+        function parseField() {
+          if (i < n && text[i] === '"') {
+            // Quoted field: read until the matching closing quote.
+            i++;
+            let field = "";
+            while (i < n) {
+              if (text[i] === '"') {
+                if (i + 1 < n && text[i + 1] === '"') {
+                  field += '"'; // escaped ""
+                  i += 2;
+                } else {
+                  i++; // closing quote
+                  break;
+                }
+              } else {
+                field += text[i++];
+              }
+            }
+            return field;
+          }
+          // Unquoted field: read until comma or line ending.
+          let field = "";
+          while (i < n && text[i] !== "," && text[i] !== "\n" && text[i] !== "\r") {
+            field += text[i++];
+          }
+          return field;
+        }
+
+        while (i < n) {
+          const row = [parseField()];
+          while (i < n && text[i] === ",") {
+            i++;
+            row.push(parseField());
+          }
+          rows.push(row);
+          if (i < n && text[i] === "\r") i++; // CRLF: skip \r
+          if (i < n && text[i] === "\n") i++; // skip \n
+        }
+
+        // Drop a trailing empty row produced by a trailing newline.
+        if (rows.length > 0 && rows[rows.length - 1].every((f) => f === "")) {
+          rows.pop();
+        }
+
+        if (rows.length === 0) return { headers: [], dataRows: [] };
+
+        const headers = rows[0];
+        const dataRows = rows.slice(1).map((row) => {
+          const obj = {};
+          headers.forEach((h, j) => { obj[h] = row[j] !== undefined ? row[j] : ""; });
+          return obj;
+        });
+        return { headers, dataRows };
       }
 
-      // --- submit: verify password FIRST, then upload the CSV ---
+      // Detect query column — same priority as processor.detect_query_column.
+      function detectQueryColumn(headers) {
+        const lower = {};
+        headers.forEach((h) => { lower[h.toLowerCase()] = h; });
+        for (const c of QUERY_CANDIDATES) {
+          if (c in lower) return lower[c];
+        }
+        return headers[0] || "";
+      }
+
+      // --------------------------------------------------------------------------
+      // CSV stringifier — quotes any value containing , " \n \r
+      // --------------------------------------------------------------------------
+      function csvField(value) {
+        const s = String(value !== null && value !== undefined ? value : "");
+        if (/[,"\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+        return s;
+      }
+
+      function csvStringify(headers, rows) {
+        const lines = [headers.map(csvField).join(",")];
+        for (const row of rows) {
+          lines.push(headers.map((h) => csvField(row[h] ?? "")).join(","));
+        }
+        return lines.join("\r\n") + "\r\n";
+      }
+
+      // --------------------------------------------------------------------------
+      // Progress bar helpers
+      // --------------------------------------------------------------------------
+      function showProgress(done, total) {
+        $("progressWrap").classList.remove("hidden");
+        updateProgress(done, total);
+      }
+
+      function updateProgress(done, total) {
+        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        $("progressFill").style.width = pct + "%";
+        $("progressText").textContent =
+          total > 0 ? `${done} / ${total} looked up · ${pct}%` : "";
+      }
+
+      function hideProgress() {
+        $("progressWrap").classList.add("hidden");
+      }
+
+      // --------------------------------------------------------------------------
+      // Form submit → chunked lookup flow
+      // --------------------------------------------------------------------------
       $("form").addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const password = $("password").value;
         const file = fileInput.files[0];
         if (!password) return setStatus("Enter the access password.", true);
         if (!file) return setStatus("Choose a CSV file first.", true);
+        if (fieldCatalog.length === 0)
+          return setStatus("Field options are still loading — try again in a moment.", true);
 
         setBusy(true);
         $("results").classList.add("hidden");
+        cancelled = false;
 
         try {
-          // 1) verify password before the CSV ever leaves the browser
+          // ── 1. Verify password ──────────────────────────────────────────────
           setStatus("Checking password…");
           const v = await fetch("/api/verify", {
             method: "POST",
@@ -341,28 +501,218 @@
           const vData = await v.json();
           if (!v.ok) throw new Error(vData.error || "Password check failed.");
           sessionStorage.setItem("rsl_pw", password);
+          const token = vData.token;
 
-          // 2) only now send the file, gated by the short-lived token
-          setStatus("Looking up statuses… this can take a moment.");
-          const body = new FormData();
-          body.append("file", file);
-          selectedFields().forEach((f) => body.append("fields", f));
-          const apiKey = $("apiKey").value.trim();
-          if (apiKey) body.append("api_key", apiKey);
+          // ── 2. Parse CSV client-side ────────────────────────────────────────
+          const raw = await file.text();
+          const { headers, dataRows } = parseCSV(raw);
+          if (dataRows.length === 0) throw new Error("The CSV has no data rows.");
 
-          const res = await fetch("/api/process", {
-            method: "POST",
-            headers: { "X-App-Token": vData.token, "X-App-Password": password },
-            body,
+          const queryCol = detectQueryColumn(headers);
+
+          // ── 3. Deduplicate unique non-empty queries ─────────────────────────
+          const queryMap = new Map(); // unique query → index in uniqueQueries[]
+          const uniqueQueries = [];
+          let nonEmptyRows = 0;
+
+          dataRows.forEach((row) => {
+            const q = (row[queryCol] || "").trim();
+            if (!q) return;
+            nonEmptyRows++;
+            if (!queryMap.has(q)) {
+              queryMap.set(q, uniqueQueries.length);
+              uniqueQueries.push(q);
+            }
           });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error || `Request failed (${res.status}).`);
-          render(data);
+
+          const duplicatesSkipped = nonEmptyRows - uniqueQueries.length;
+
+          // ── 4. Cost confirm if > 1000 unique lookups ────────────────────────
+          if (uniqueQueries.length > COST_CONFIRM_THRESHOLD) {
+            if (!confirm(
+              `This will look up ${uniqueQueries.length} places ` +
+              `(~${uniqueQueries.length} API calls). Continue?`
+            )) {
+              setStatus("");
+              setBusy(false);
+              return;
+            }
+          }
+
+          showProgress(0, uniqueQueries.length);
+          setStatus(
+            `Processing ${uniqueQueries.length} unique ` +
+            `quer${uniqueQueries.length === 1 ? "y" : "ies"}…`
+          );
+
+          // ── 5. BYO-key probe (once, before the chunk loop) ─────────────────
+          let keyUsed = null;
+          let keyWarning = null;
+          const apiKey = $("apiKey").value.trim();
+          let sendApiKey = false; // true only if the probe accepted the user's key
+
+          if (apiKey) {
+            setStatus("Checking your API key…");
+            const probeResp = await fetch("/api/process", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-App-Token": token,
+                "X-App-Password": password,
+              },
+              body: JSON.stringify({ probe_only: true, api_key: apiKey }),
+            });
+            const probeData = await probeResp.json();
+            if (!probeResp.ok) throw new Error(probeData.error || "Key probe failed.");
+            keyUsed = probeData.key_used;
+            keyWarning = probeData.key_warning;
+            // Only forward the key in chunks if the probe accepted it.
+            sendApiKey = !!(keyUsed && keyUsed.includes("your key"));
+          }
+
+          // ── 6. Chunk loop (sequential, 75 queries at a time) ───────────────
+          const resultsByQuery = new Map(); // query → flat result object from server
+          let totalApiCalls = 0;
+          let totalErrorCount = 0;
+          const allErrorReasons = {};
+          let chunkFailures = 0;
+          const fields = selectedFields();
+
+          for (let offset = 0; offset < uniqueQueries.length; offset += CHUNK_SIZE) {
+            if (cancelled) break;
+
+            const chunk = uniqueQueries.slice(offset, offset + CHUNK_SIZE);
+            const body = { queries: chunk, fields };
+            if (sendApiKey) {
+              body.api_key = apiKey;
+              body.skip_probe = true; // already validated above; skip re-probing
+            }
+
+            try {
+              const resp = await fetch("/api/process", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-App-Token": token,
+                  "X-App-Password": password,
+                },
+                body: JSON.stringify(body),
+              });
+              const data = await resp.json();
+              if (!resp.ok) throw new Error(data.error || `Chunk failed (${resp.status}).`);
+
+              data.results.forEach((r) => resultsByQuery.set(r.query, r));
+              totalApiCalls += data.api_calls || 0;
+              totalErrorCount += data.error_count || 0;
+              if (data.error_reasons) {
+                Object.entries(data.error_reasons).forEach(([k, v]) => {
+                  allErrorReasons[k] = (allErrorReasons[k] || 0) + v;
+                });
+              }
+              // Capture key info from first chunk if we skipped the probe.
+              if (!keyUsed) {
+                keyUsed = data.key_used;
+                keyWarning = data.key_warning;
+              }
+            } catch (_err) {
+              // Failed chunk: mark every query in this chunk as ERROR and continue.
+              chunkFailures++;
+              chunk.forEach((q) => {
+                resultsByQuery.set(q, {
+                  query: q,
+                  business_status: "ERROR",
+                  business_status_label: "Error: chunk failed",
+                });
+                totalErrorCount++;
+              });
+            }
+
+            const done = Math.min(offset + CHUNK_SIZE, uniqueQueries.length);
+            updateProgress(done, uniqueQueries.length);
+            setStatus(`${done} / ${uniqueQueries.length} looked up…`);
+          }
+
+          // ── 7. Merge results back into original row order ──────────────────
+          const fieldCols = getOutputFieldColumns();
+          const outputHeaders = [...headers];
+          fieldCols.forEach((c) => { if (!outputHeaders.includes(c)) outputHeaders.push(c); });
+
+          const outputRows = dataRows.map((row) => {
+            const q = (row[queryCol] || "").trim();
+            const out = Object.assign({}, row);
+            if (!q) {
+              // Empty query: error cells, leave other field cols blank.
+              out.business_status = "ERROR";
+              out.business_status_label = "Error: empty query";
+              fieldCols.forEach((c) => { if (!(c in out)) out[c] = ""; });
+            } else {
+              const result = resultsByQuery.get(q);
+              if (result) {
+                fieldCols.forEach((c) => {
+                  out[c] = result[c] !== undefined ? result[c] : "";
+                });
+              } else {
+                // Not looked up (cancelled before this query's chunk).
+                fieldCols.forEach((c) => { if (!(c in out)) out[c] = ""; });
+              }
+            }
+            return out;
+          });
+
+          // ── 8. Build summary counts and error banner ───────────────────────
+          const summary = {};
+          outputRows.forEach((r) => {
+            const label = r.business_status_label || "";
+            summary[label] = (summary[label] || 0) + 1;
+          });
+
+          let errorBannerText = null;
+          if (totalErrorCount > 0) {
+            const topEntry = Object.entries(allErrorReasons)
+              .sort((a, b) => b[1] - a[1])[0];
+            errorBannerText =
+              `${totalErrorCount} of ${uniqueQueries.length} lookups had problems` +
+              (topEntry
+                ? ` (most common: ${REASON_TEXT[topEntry[0]] || topEntry[0]})`
+                : "") +
+              ".";
+            if (allErrorReasons.quota)
+              errorBannerText += " You may have hit your Google API quota or rate limit.";
+            if (allErrorReasons.auth)
+              errorBannerText += " The API key was rejected.";
+          }
+          if (chunkFailures > 0) {
+            const note =
+              `${chunkFailures} chunk${chunkFailures !== 1 ? "s" : ""} ` +
+              `failed entirely — those rows are marked ERROR.`;
+            errorBannerText = errorBannerText
+              ? errorBannerText + " " + note
+              : note;
+          }
+
+          // ── 9. Render results ──────────────────────────────────────────────
+          render({
+            rows: outputRows,
+            columns: outputHeaders,
+            api_calls: totalApiCalls,
+            row_count: dataRows.length,
+            error_count: totalErrorCount,
+            error_banner: errorBannerText,
+            key_used: keyUsed,
+            key_warning: keyWarning,
+            duplicates_skipped: duplicatesSkipped,
+            csv: csvStringify(outputHeaders, outputRows),
+            filename: "restaurant_status.csv",
+            summary,
+          });
           setStatus("");
+
         } catch (err) {
           setStatus(err.message, true);
         } finally {
           setBusy(false);
+          hideProgress();
+          cancelled = false;
         }
       });
 
@@ -374,6 +724,14 @@
         const el = $("status");
         el.textContent = text;
         el.classList.toggle("err", !!isError);
+      }
+
+      function badgeClass(label) {
+        const l = (label || "").toLowerCase();
+        if (l === "open") return "open";
+        if (l.startsWith("temporarily")) return "temp";
+        if (l.startsWith("permanently")) return "perm";
+        return "other";
       }
 
       function render(data) {
@@ -390,8 +748,20 @@
 
         const pills = $("pills");
         pills.innerHTML =
-          `<span class="pill">${data.row_count} rows · ${data.api_calls} API calls` +
-          (data.key_used ? ` · ${esc(data.key_used)}` : "") + `</span>`;
+          `<span class="pill">${data.row_count} row${data.row_count !== 1 ? "s" : ""}` +
+          ` · ${data.api_calls} API call${data.api_calls !== 1 ? "s" : ""}` +
+          (data.key_used ? ` · ${esc(data.key_used)}` : "") +
+          `</span>`;
+
+        if (data.duplicates_skipped > 0) {
+          const s = document.createElement("span");
+          s.className = "pill";
+          s.textContent =
+            `${data.duplicates_skipped} duplicate row` +
+            `${data.duplicates_skipped !== 1 ? "s" : ""} skipped`;
+          pills.appendChild(s);
+        }
+
         Object.entries(data.summary)
           .sort((a, b) => b[1] - a[1])
           .forEach(([label, n]) => {
