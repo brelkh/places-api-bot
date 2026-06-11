@@ -1,11 +1,12 @@
 # places-api-bot
 
-[![Live demo](https://img.shields.io/badge/Live_demo-Open_app-2563eb?logo=vercel&logoColor=white)](https://places-api-bot-git-claude-nice-meitner-sk537j-brelkhs-projects.vercel.app/)
-[![Deployed on Vercel](https://img.shields.io/badge/Deployed_on-Vercel-000000?logo=vercel&logoColor=white)](https://places-api-bot-git-claude-nice-meitner-sk537j-brelkhs-projects.vercel.app/)
+[![Live demo](https://img.shields.io/badge/Live_demo-Open_app-2563eb?logo=vercel&logoColor=white)](https://places-api-bot.vercel.app/)
+[![Deployed on Vercel](https://img.shields.io/badge/Deployed_on-Vercel-000000?logo=vercel&logoColor=white)](https://places-api-bot.vercel.app/)
 
 Look up the Google Maps **business status** (open / temporarily closed /
 permanently closed) for a list of restaurants — as a **web app** or a **CLI**.
 
+<!-- Note: screenshot predates the field-selection checkboxes and BYO-key UI. -->
 ![The Restaurant Status Lookup web app](docs/screenshot.png)
 
 It reads a list of restaurant names, looks each one up with the Google
@@ -15,19 +16,30 @@ CSV; the CLI reads `restaurants.csv` and writes `restaurant_status.csv`.
 
 ## Using the web app
 
-**🔗 [Open the app](https://places-api-bot-git-claude-nice-meitner-sk537j-brelkhs-projects.vercel.app/)**
+**🔗 [Open the app](https://places-api-bot.vercel.app/)**
 &nbsp;·&nbsp; ask the project owner for the shared **access password**.
 
 1. **Enter the access password** (set by whoever deployed it, via the
-   `APP_PASSWORD` setting).
+   `APP_PASSWORD` setting). The password is checked **before** your CSV is
+   uploaded, so the file is never sent on a wrong password.
 2. **Choose or drag in a CSV** of restaurant names. It needs a header row and
-   one name per line; the query column is detected automatically (a column
-   named `query`, `restaurant`, `name`, … — otherwise the first column). Any
-   extra columns you include are kept and passed straight through.
-3. Click **Look up statuses**. Results appear as a colour-coded table —
+   one name per line; **any column name works** — the query column is
+   auto-detected, otherwise the first column is used. If several match, the
+   priority is `query` → `restaurant` → `name` (so a file with both `query` and
+   `name` uses `query`). Extra columns are kept and passed straight through. Not
+   sure of the format? Click **Download a template CSV** and fill it in.
+3. **Tick the information you want** (status, matched name, address, Maps link,
+   coordinates, category…). Every option is in the same **Pro** price tier, so
+   selecting more never moves you into a pricier tier. Business status is always
+   included.
+4. *(Optional)* Expand **Use your own Google API key** to run on your own key —
+   it's tried first and falls back to the app's key if it fails (you're told
+   why). It's used only for that request and never stored.
+5. Click **Look up statuses**. Results appear as a colour-coded table —
    <kbd>Open</kbd>, <kbd>Temporarily closed</kbd>, <kbd>Permanently closed</kbd>,
-   plus `Not found` / `Unknown` / `Error` when applicable.
-4. Click **Download CSV** to save the full results (`restaurant_status.csv`).
+   plus `Not found` / `Unknown` / `Error` when applicable. A banner warns you if
+   lookups failed and **why** (e.g. quota/limit exceeded, key rejected).
+6. Click **Download CSV** to save the full results (`restaurant_status.csv`).
 
 ### Tips
 
@@ -44,10 +56,6 @@ CSV; the CLI reads `restaurants.csv` and writes `restaurant_status.csv`.
 - The summary pills show the **row count and number of API calls** — duplicate
   names are looked up only once, so calls ≤ rows.
 
-> The link above is the current preview deployment for this branch. After you
-> merge to `main`, Vercel will also give you a stable production URL you can
-> share instead.
-
 ## How it works
 
 For each row it sends the query (with `" singapore"` appended) to the Text
@@ -55,21 +63,19 @@ Search endpoint, takes the best match, and records its `businessStatus`.
 
 ### Cost control
 
-The request field mask is restricted to the **Pro** pricing tier — the cheapest
-tier that still returns business status:
-
-```
-places.id, places.displayName, places.formattedAddress,
-places.businessStatus, places.googleMapsUri
-```
+Every selectable field lives in [`places_bot/fields.py`](places_bot/fields.py)
+and is in the **Pro** (or cheaper IDs-only) pricing tier — the cheapest tier
+that still returns business status. Callers pick fields **by id**, and unknown
+ids are ignored, so a request can **never** escalate into the pricier
+**Enterprise** tier no matter what is selected. The field mask is built from
+whatever you tick (web) or pass to `--fields` (CLI); the default is
+`businessStatus`, `displayName`, `formattedAddress`, `googleMapsUri`.
 
 > **Note on the original example query:** it requested
 > `places.currentOpeningHours.openNow`, which is an **Enterprise-tier** field and
-> would have charged every call at the higher rate. It's intentionally left out.
-> `businessStatus` already returns `OPERATIONAL`, `CLOSED_TEMPORARILY`, and
-> `CLOSED_PERMANENTLY`, which is exactly what we need. `displayName` and
-> `formattedAddress` are kept (still Pro tier) so you can eyeball whether the
-> right restaurant was matched.
+> would have charged every call at the higher rate. It's intentionally excluded
+> from the catalog. `businessStatus` already returns `OPERATIONAL`,
+> `CLOSED_TEMPORARILY`, and `CLOSED_PERMANENTLY`, which is exactly what we need.
 
 It also keeps a **local monthly call counter** (`.places_usage.json`) and warns
 before a run would push the current month past a threshold (default `10000`,
@@ -95,9 +101,10 @@ python -m places_bot --input restaurants.csv --output restaurant_status.csv
 
 ### Input format
 
-A CSV with a header row. The query column is auto-detected (it looks for a
-column named `query`, `restaurant`, `restaurant_name`, or `name`, otherwise it
-uses the first column). Override with `--query-column`. Any extra columns you
+A CSV with a header row. The query column is auto-detected by **priority**:
+`query` → `restaurant` → `restaurant_name` → `name`; if none match, the first
+column is used. So when more than one matches (e.g. both `query` and `name`),
+`query` wins. Override with `--query-column` (CLI only). Any extra columns you
 include are carried through to the output untouched.
 
 ```csv
@@ -108,7 +115,7 @@ Tian Tian Hainanese Chicken Rice Maxwell
 
 ### Output
 
-The same rows with these columns appended:
+Your rows with the selected fields' columns appended. By default:
 
 | column | meaning |
 | --- | --- |
@@ -118,18 +125,31 @@ The same rows with these columns appended:
 | `matched_address` | matched address |
 | `google_maps_uri` | link to the place on Google Maps |
 
+Pick which fields to include with `--fields` (web app: checkboxes). The full
+catalog lives in [`places_bot/fields.py`](places_bot/fields.py) and is **all
+within the Pro pricing tier** — `businessStatus` (always on), `displayName`,
+`formattedAddress`, `googleMapsUri`, `shortFormattedAddress`, `location`,
+`primaryTypeDisplayName`, `types`, `plusCode`, `id`. Selecting more fields never
+moves you into a pricier tier.
+
 ### Useful options
 
 | flag | description |
 | --- | --- |
+| `--fields a,b,c` | output fields to include (default: status + name + address + maps link) |
 | `--suffix " singapore"` | text appended to every query |
 | `--query-column NAME` | force which column holds the query |
 | `--threshold N` | warn above N estimated calls this month (default 10000) |
 | `--yes` | don't prompt at the threshold (used in CI) |
 | `--no-dedupe` | call the API even for repeated queries (costs more) |
 
+```bash
+python -m places_bot --fields businessStatus,displayName,location,types
+```
+
 Duplicate queries are de-duplicated by default so you're never charged twice
-for the same lookup in one run.
+for the same lookup in one run. If lookups fail, the run ends with a warning
+that classifies why (e.g. `quota` = you may have hit your Google API limit).
 
 ## Running in GitHub Actions
 
@@ -146,14 +166,32 @@ same `places_bot` engine). Upload a CSV, get a results table, download the
 output CSV — no terminal needed.
 
 ```
-public/index.html   clean single-page UI (upload → results table → download)
-api/process.py      serverless function: password gate → lookups → JSON + CSV
+public/index.html   single-page UI (field checkboxes, optional key, results table)
+api/process.py      serverless function: 3 endpoints (see below)
 vercel.json         bundles the places_bot package with the function
 ```
+
+Endpoints in `api/process.py`:
+
+| route | purpose |
+| --- | --- |
+| `GET /api/fields` | the selectable Pro-tier field catalog (drives the checkboxes) |
+| `POST /api/verify` | checks the password **before** any CSV upload; returns a short-lived signed token. Rate-limited per IP. |
+| `POST /api/process` | runs the lookups; gated by the token (or password) |
 
 The function looks up statuses **concurrently** (`PLACES_MAX_WORKERS`, default 8)
 so a CSV finishes inside the request timeout, and your API key never leaves the
 server.
+
+### Abuse protection
+
+`POST /api/verify` is rate-limited per IP (5 wrong passwords / 10 min → `429`),
+and `POST /api/process` is capped per IP to limit Vercel/API usage. **This
+limiter is in-memory and per-instance** — because Vercel runs many ephemeral
+instances it slows casual attacks but is not a hard guarantee. For real
+protection, enable **Vercel Firewall / Attack Challenge Mode** (Project →
+Settings → Firewall) and use a strong `APP_PASSWORD`. Uploads are also capped at
+4 MB.
 
 ### Deploy
 

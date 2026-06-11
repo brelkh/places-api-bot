@@ -5,5 +5,8 @@
       "maxDuration": 60,
       "includeFiles": "places_bot/**"
     }
-  }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/process" }
+  ]
 }

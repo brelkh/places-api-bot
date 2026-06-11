@@ -1,18 +1,28 @@
 """Shared restaurant-status lookup, used by both the CLI and the web app.
 
 This is the single source of truth for turning a list of rows + a query column
-into rows enriched with business-status columns. It handles de-duplication of
-identical queries and can run lookups concurrently (the web app uses this to
+into rows enriched with the selected output columns. It handles de-duplication
+of identical queries and can run lookups concurrently (the web app uses this to
 finish a CSV inside the request timeout; the CLI runs it sequentially).
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Callable
 
 from . import processor
 from .client import PlacesAPIError, PlacesClient
+from .fields import FieldSpec
+
+
+@dataclass
+class LookupSummary:
+    api_calls: int = 0
+    error_count: int = 0
+    error_reasons: dict[str, int] = field(default_factory=dict)
 
 
 def full_query(raw_query: str, suffix: str) -> str:
@@ -21,8 +31,10 @@ def full_query(raw_query: str, suffix: str) -> str:
 
 
 def _execute(
-    fn: Callable[[str], dict[str, str]], queries: list[str], max_workers: int
-) -> list[dict[str, str]]:
+    fn: Callable[[str], tuple[dict[str, str], str | None]],
+    queries: list[str],
+    max_workers: int,
+) -> list[tuple[dict[str, str], str | None]]:
     """Run `fn` over `queries`, preserving order. Concurrent if max_workers > 1."""
     if not queries:
         return []
@@ -38,11 +50,12 @@ def lookup_statuses(
     *,
     suffix: str,
     client: PlacesClient,
+    fields: list[FieldSpec],
     dedupe: bool = True,
     max_workers: int = 1,
     on_result: Callable[[dict[str, str]], None] | None = None,
-) -> int:
-    """Enrich `rows` in place with status columns. Returns the API call count.
+) -> LookupSummary:
+    """Enrich `rows` in place with the selected columns. Returns a LookupSummary.
 
     Rows with an empty query get an error summary and cost no API call. When
     `dedupe` is True, identical queries are looked up once and shared.
@@ -50,11 +63,11 @@ def lookup_statuses(
     order), which the CLI uses for progress output.
     """
 
-    def call(query: str) -> dict[str, str]:
+    def call(query: str) -> tuple[dict[str, str], str | None]:
         try:
-            return processor.summarize_places(client.search_text(query))
+            return processor.summarize_places(client.search_text(query), fields), None
         except PlacesAPIError as exc:
-            return processor.error_summary(str(exc))
+            return processor.error_summary(fields, str(exc)), exc.reason
 
     # Build the list of queries to actually send (deduped or one per row).
     work: list[str] = []
@@ -73,15 +86,49 @@ def lookup_statuses(
     result_map = dict(zip(work, results)) if dedupe else None
     result_iter = iter(results)
 
+    reasons: Counter[str] = Counter()
+    error_count = 0
     for row in rows:
         raw = (row.get(query_col) or "").strip()
         if not raw:
-            row.update(processor.error_summary("empty query"))
+            summary, reason = processor.error_summary(fields, "empty query"), "empty"
         elif dedupe:
-            row.update(result_map[full_query(raw, suffix)])  # type: ignore[index]
+            summary, reason = result_map[full_query(raw, suffix)]  # type: ignore[index]
         else:
-            row.update(next(result_iter))
+            summary, reason = next(result_iter)
+        if reason:
+            reasons[reason] += 1
+            error_count += 1
+        row.update(summary)
         if on_result is not None:
             on_result(row)
 
-    return len(work)
+    return LookupSummary(
+        api_calls=len(work), error_count=error_count, error_reasons=dict(reasons)
+    )
+
+
+def probe_key(
+    api_key: str,
+    *,
+    region_code: str,
+    language_code: str,
+    query: str = "Starbucks",
+) -> PlacesAPIError | None:
+    """Validate an API key with one cheap IDs-only call.
+
+    Returns None if the key works, or the PlacesAPIError (with `.reason`) if it
+    doesn't — used to decide whether to fall back to another key.
+    """
+    client = PlacesClient(
+        api_key=api_key,
+        field_mask="places.id",  # cheapest (IDs-only) tier
+        region_code=region_code,
+        language_code=language_code,
+        max_retries=2,
+    )
+    try:
+        client.search_text(query)
+        return None
+    except PlacesAPIError as exc:
+        return exc

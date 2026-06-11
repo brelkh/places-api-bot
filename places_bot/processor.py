@@ -1,26 +1,18 @@
-"""CSV reading, result summarisation, and CSV writing."""
+"""CSV reading, result summarisation, and CSV writing.
+
+Output columns are driven by the selected fields (see `places_bot.fields`), so
+`summarize_places`, `error_summary`, `output_fieldnames`, `rows_to_csv`, and
+`write_rows` all take a list of `FieldSpec`.
+"""
 
 from __future__ import annotations
 
 import csv
 import io
-from typing import Any, Iterable
+from typing import Iterable
 
-# Google Maps' raw businessStatus values -> friendly labels.
-BUSINESS_STATUS_LABELS = {
-    "OPERATIONAL": "Open",
-    "CLOSED_TEMPORARILY": "Temporarily closed",
-    "CLOSED_PERMANENTLY": "Permanently closed",
-}
-
-# Columns this tool appends to each input row.
-OUTPUT_COLUMNS = [
-    "business_status",  # raw Google value, or NOT_FOUND / ERROR
-    "business_status_label",  # human-friendly version
-    "matched_name",  # so you can confirm the right place was matched
-    "matched_address",
-    "google_maps_uri",
-]
+from . import fields as fields_mod
+from .fields import FieldSpec
 
 # Candidate column names to auto-detect the query column (case-insensitive).
 QUERY_COLUMN_CANDIDATES = ("query", "restaurant", "restaurant_name", "name")
@@ -39,49 +31,46 @@ def detect_query_column(fieldnames: Iterable[str]) -> str:
     return names[0]
 
 
-def summarize_places(places: list[dict[str, Any]]) -> dict[str, str]:
-    """Turn the API's places list into the flat columns we output."""
+def _blank_summary(
+    fields: list[FieldSpec], status: str, label: str
+) -> dict[str, str]:
+    """Output row for the no-match / error cases: status set, rest blank."""
+    out: dict[str, str] = {}
+    for field in fields:
+        if field.id == fields_mod.STATUS_FIELD_ID:
+            out["business_status"] = status
+            out["business_status_label"] = label
+        else:
+            for col in field.columns:
+                out[col] = ""
+    return out
+
+
+def summarize_places(
+    places: list[dict], fields: list[FieldSpec]
+) -> dict[str, str]:
+    """Turn the API's places list into the chosen output columns."""
     if not places:
-        return {
-            "business_status": "NOT_FOUND",
-            "business_status_label": "Not found",
-            "matched_name": "",
-            "matched_address": "",
-            "google_maps_uri": "",
-        }
+        return _blank_summary(fields, "NOT_FOUND", "Not found")
 
     place = places[0]  # Text Search returns best match first.
-    raw_status = place.get("businessStatus", "")
-    if raw_status:
-        label = BUSINESS_STATUS_LABELS.get(raw_status, raw_status)
-    else:
-        # Place matched but Google has no business status for it.
-        raw_status = "UNKNOWN"
-        label = "Unknown"
-
-    return {
-        "business_status": raw_status,
-        "business_status_label": label,
-        "matched_name": (place.get("displayName") or {}).get("text", ""),
-        "matched_address": place.get("formattedAddress", ""),
-        "google_maps_uri": place.get("googleMapsUri", ""),
-    }
+    out: dict[str, str] = {}
+    for field in fields:
+        out.update(field.extract(place))
+    return out
 
 
-def error_summary(message: str) -> dict[str, str]:
-    return {
-        "business_status": "ERROR",
-        "business_status_label": f"Error: {message}",
-        "matched_name": "",
-        "matched_address": "",
-        "google_maps_uri": "",
-    }
+def error_summary(fields: list[FieldSpec], message: str) -> dict[str, str]:
+    """Output row for a lookup that raised (status ERROR + the reason)."""
+    return _blank_summary(fields, "ERROR", f"Error: {message}")
 
 
-def output_fieldnames(fieldnames: Iterable[str]) -> list[str]:
-    """Input columns plus any OUTPUT_COLUMNS not already present."""
+def output_fieldnames(
+    fieldnames: Iterable[str], fields: list[FieldSpec]
+) -> list[str]:
+    """Input columns plus the selected fields' columns not already present."""
     out_fields = list(fieldnames)
-    for col in OUTPUT_COLUMNS:
+    for col in fields_mod.field_columns(fields):
         if col not in out_fields:
             out_fields.append(col)
     return out_fields
@@ -97,11 +86,15 @@ def read_rows_from_text(text: str) -> tuple[list[str], list[dict[str, str]]]:
     return fieldnames, rows
 
 
-def rows_to_csv(fieldnames: Iterable[str], rows: list[dict[str, str]]) -> str:
-    """Serialise rows to CSV text, appending OUTPUT_COLUMNS that aren't present."""
+def rows_to_csv(
+    fieldnames: Iterable[str], rows: list[dict[str, str]], fields: list[FieldSpec]
+) -> str:
+    """Serialise rows to CSV text with the selected fields' columns appended."""
     buffer = io.StringIO()
     writer = csv.DictWriter(
-        buffer, fieldnames=output_fieldnames(fieldnames), extrasaction="ignore"
+        buffer,
+        fieldnames=output_fieldnames(fieldnames, fields),
+        extrasaction="ignore",
     )
     writer.writeheader()
     writer.writerows(rows)
@@ -119,8 +112,11 @@ def read_rows(input_path: str) -> tuple[list[str], list[dict[str, str]]]:
 
 
 def write_rows(
-    output_path: str, fieldnames: list[str], rows: list[dict[str, str]]
+    output_path: str,
+    fieldnames: list[str],
+    rows: list[dict[str, str]],
+    fields: list[FieldSpec],
 ) -> None:
-    """Write rows to a file, appending OUTPUT_COLUMNS that aren't present."""
+    """Write rows to a file with the selected fields' columns appended."""
     with open(output_path, "w", newline="", encoding="utf-8") as fh:
-        fh.write(rows_to_csv(fieldnames, rows))
+        fh.write(rows_to_csv(fieldnames, rows, fields))
