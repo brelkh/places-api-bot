@@ -6,6 +6,7 @@
 Look up the Google Maps **business status** (open / temporarily closed /
 permanently closed) for a list of restaurants — as a **web app** or a **CLI**.
 
+<!-- Note: screenshot predates the field-selection checkboxes and BYO-key UI. -->
 ![The Restaurant Status Lookup web app](docs/screenshot.png)
 
 It reads a list of restaurant names, looks each one up with the Google
@@ -61,21 +62,19 @@ Search endpoint, takes the best match, and records its `businessStatus`.
 
 ### Cost control
 
-The request field mask is restricted to the **Pro** pricing tier — the cheapest
-tier that still returns business status:
-
-```
-places.id, places.displayName, places.formattedAddress,
-places.businessStatus, places.googleMapsUri
-```
+Every selectable field lives in [`places_bot/fields.py`](places_bot/fields.py)
+and is in the **Pro** (or cheaper IDs-only) pricing tier — the cheapest tier
+that still returns business status. Callers pick fields **by id**, and unknown
+ids are ignored, so a request can **never** escalate into the pricier
+**Enterprise** tier no matter what is selected. The field mask is built from
+whatever you tick (web) or pass to `--fields` (CLI); the default is
+`businessStatus`, `displayName`, `formattedAddress`, `googleMapsUri`.
 
 > **Note on the original example query:** it requested
 > `places.currentOpeningHours.openNow`, which is an **Enterprise-tier** field and
-> would have charged every call at the higher rate. It's intentionally left out.
-> `businessStatus` already returns `OPERATIONAL`, `CLOSED_TEMPORARILY`, and
-> `CLOSED_PERMANENTLY`, which is exactly what we need. `displayName` and
-> `formattedAddress` are kept (still Pro tier) so you can eyeball whether the
-> right restaurant was matched.
+> would have charged every call at the higher rate. It's intentionally excluded
+> from the catalog. `businessStatus` already returns `OPERATIONAL`,
+> `CLOSED_TEMPORARILY`, and `CLOSED_PERMANENTLY`, which is exactly what we need.
 
 It also keeps a **local monthly call counter** (`.places_usage.json`) and warns
 before a run would push the current month past a threshold (default `10000`,

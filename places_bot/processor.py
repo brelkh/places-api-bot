@@ -14,9 +14,6 @@ from typing import Iterable
 from . import fields as fields_mod
 from .fields import FieldSpec
 
-# Re-exported for backwards compatibility / convenience.
-BUSINESS_STATUS_LABELS = fields_mod.BUSINESS_STATUS_LABELS
-
 # Candidate column names to auto-detect the query column (case-insensitive).
 QUERY_COLUMN_CANDIDATES = ("query", "restaurant", "restaurant_name", "name")
 

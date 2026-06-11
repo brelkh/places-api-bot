@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import Any
@@ -30,8 +31,6 @@ def classify_error(status_code: int | None, body: str) -> str:
     """Map an HTTP status + Google error body to a coarse reason."""
     status_text = ""
     try:
-        import json
-
         status_text = (json.loads(body).get("error") or {}).get("status", "")
     except (ValueError, AttributeError):
         pass

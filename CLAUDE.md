@@ -112,6 +112,13 @@ After making a code change, do these in order:
   this; set `git config user.email noreply@anthropic.com` / `user.name Claude`).
 - **Frontend has no build step** — plain HTML/CSS/JS in `public/index.html`.
   Vercel serves `public/` at `/` and `api/*.py` as functions automatically.
+- **Vercel routes functions by filename.** All `/api/*` paths are sent to the
+  single `api/process.py` via the `rewrites` rule in `vercel.json`; Flask then
+  dispatches by the (preserved) original path. If you add a new Flask route like
+  `/api/foo`, it works locally but **404s on Vercel unless** the rewrite covers
+  it (it covers `/api/(.*)`, so you're fine). Don't add a second `api/*.py`
+  expecting the in-memory rate limiter to be shared — separate functions are
+  separate instances.
 - **`MAX_ROWS` (default 750)** caps a single web upload so it finishes inside the
   60s Vercel timeout. Large batches → split, or use the CLI (uncapped).
 - **Output columns** come from the selected `FieldSpec`s (`fields.field_columns`);

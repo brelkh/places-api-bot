@@ -276,8 +276,6 @@ def _choose_key():
     """Returns (api_key, key_used, key_warning, probe_calls, error_response)."""
     user_key = (request.form.get("api_key") or "").strip()
     server_key = os.environ.get(config.API_KEY_ENV_VAR, "").strip()
-    region = request.form.get("region_code", config.DEFAULT_REGION_CODE)
-    language = request.form.get("language_code", config.DEFAULT_LANGUAGE_CODE)
 
     if not user_key:
         if not server_key:
@@ -289,8 +287,11 @@ def _choose_key():
         return server_key, "the app's key", None, 0, None
 
     # User supplied a key: validate it with one cheap call before the batch.
+    # Region/language match the batch defaults (this app is Singapore-focused).
     probe_error = service.probe_key(
-        user_key, region_code=region, language_code=language
+        user_key,
+        region_code=config.DEFAULT_REGION_CODE,
+        language_code=config.DEFAULT_LANGUAGE_CODE,
     )
     if probe_error is None:
         return user_key, "your key", None, 1, None
