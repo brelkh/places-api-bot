@@ -116,10 +116,11 @@ FIELD_CATALOG: list[FieldSpec] = [
     ),
     FieldSpec(
         "types",
-        "All categories",
+        "Categories",
         ("types",),
         "places.types",
         lambda p: {"types": ", ".join(p.get("types") or [])},
+        description="All category tags Google lists (e.g. restaurant, cafe).",
     ),
     FieldSpec(
         "plusCode",

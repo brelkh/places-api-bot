@@ -91,6 +91,11 @@
       .check input { margin-top: 3px; }
       .check .cap { color: var(--muted); font-weight: 400; display: block; font-size: 12.5px; }
       .check label { font-weight: 600; margin: 0; }
+      .check.selectall {
+        padding: 11px 13px; border: 1px solid #c7d7fb; border-radius: 10px;
+        background: #eef4ff; margin: 12px 0 4px; cursor: pointer;
+      }
+      .check.selectall strong { color: var(--brand-ink); }
       button {
         appearance: none; border: none; background: var(--brand); color: #fff;
         font-weight: 600; font-size: 15px; padding: 12px 20px; border-radius: 10px;
@@ -167,8 +172,21 @@
         </div>
 
         <div class="field">
-          <label>Information to include <span style="font-weight:400;color:var(--muted)">(all within the same Pro price tier)</span></label>
-          <div class="checks" id="checks"></div>
+          <details>
+            <summary>Information to include <span style="font-weight:400;color:var(--muted)">— columns to add (defaults are set)</span></summary>
+            <p class="hint" style="margin-top:10px">
+              Business status is always included. Everything here is in the same
+              <strong>Pro</strong> price tier, so adding more never bumps you to a
+              pricier tier.
+            </p>
+            <label class="check selectall">
+              <input type="checkbox" id="selectAll" />
+              <span><strong>Select all fields</strong>
+                <span class="cap">Tick or untick every optional field below.</span>
+              </span>
+            </label>
+            <div class="checks" id="checks"></div>
+          </details>
         </div>
 
         <div class="field">
@@ -240,12 +258,29 @@
               </label>`;
             box.appendChild(wrap);
           });
+          syncSelectAll();
         })
         .catch(() => setStatus("Couldn't load field options.", true));
 
       function selectedFields() {
         return [...document.querySelectorAll("#checks input:checked")].map((c) => c.value);
       }
+
+      // --- "Select all" master toggle (excludes the locked business-status box) ---
+      const selectAll = $("selectAll");
+      function optionalBoxes() {
+        return [...document.querySelectorAll("#checks input[type=checkbox]:not(:disabled)")];
+      }
+      function syncSelectAll() {
+        const boxes = optionalBoxes();
+        const on = boxes.filter((b) => b.checked).length;
+        selectAll.checked = boxes.length > 0 && on === boxes.length;
+        selectAll.indeterminate = on > 0 && on < boxes.length;
+      }
+      selectAll.addEventListener("change", () => {
+        optionalBoxes().forEach((b) => (b.checked = selectAll.checked));
+      });
+      $("checks").addEventListener("change", syncSelectAll);
 
       // --- file picker + drag & drop ---
       drop.addEventListener("click", () => fileInput.click());
