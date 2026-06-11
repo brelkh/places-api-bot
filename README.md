@@ -1,9 +1,52 @@
 # places-api-bot
 
-Reads a list of restaurant names from **`restaurants.csv`**, looks each one up
-with the Google **Places API (New)** Text Search endpoint, and writes
-**`restaurant_status.csv`** — your original rows plus the Google Maps
-**business status** (open / temporarily closed / permanently closed).
+[![Live demo](https://img.shields.io/badge/Live_demo-Open_app-2563eb?logo=vercel&logoColor=white)](https://places-api-bot-git-claude-nice-meitner-sk537j-brelkhs-projects.vercel.app/)
+[![Deployed on Vercel](https://img.shields.io/badge/Deployed_on-Vercel-000000?logo=vercel&logoColor=white)](https://places-api-bot-git-claude-nice-meitner-sk537j-brelkhs-projects.vercel.app/)
+
+Look up the Google Maps **business status** (open / temporarily closed /
+permanently closed) for a list of restaurants — as a **web app** or a **CLI**.
+
+![The Restaurant Status Lookup web app](docs/screenshot.png)
+
+It reads a list of restaurant names, looks each one up with the Google
+**Places API (New)** Text Search endpoint, and returns your original rows plus
+the business status. The web app shows a results table you can download as a
+CSV; the CLI reads `restaurants.csv` and writes `restaurant_status.csv`.
+
+## Using the web app
+
+**🔗 [Open the app](https://places-api-bot-git-claude-nice-meitner-sk537j-brelkhs-projects.vercel.app/)**
+&nbsp;·&nbsp; ask the project owner for the shared **access password**.
+
+1. **Enter the access password** (set by whoever deployed it, via the
+   `APP_PASSWORD` setting).
+2. **Choose or drag in a CSV** of restaurant names. It needs a header row and
+   one name per line; the query column is detected automatically (a column
+   named `query`, `restaurant`, `name`, … — otherwise the first column). Any
+   extra columns you include are kept and passed straight through.
+3. Click **Look up statuses**. Results appear as a colour-coded table —
+   <kbd>Open</kbd>, <kbd>Temporarily closed</kbd>, <kbd>Permanently closed</kbd>,
+   plus `Not found` / `Unknown` / `Error` when applicable.
+4. Click **Download CSV** to save the full results (`restaurant_status.csv`).
+
+### Tips
+
+- **Add a city/area to ambiguous names.** The app appends `" singapore"` to
+  every query, but a generic name like *"McDonald's"* still matches many
+  outlets — *"McDonald's ARC"* or *"Tian Tian Maxwell"* lands the right one.
+- **Check the `matched_name` / `matched_address` columns** to confirm the right
+  place was matched, and use the **map ↗** link to eyeball it on Google Maps.
+- **`Not found`** usually means the name was too vague or misspelled — try
+  adding the mall, street, or neighbourhood.
+- **Big lists:** a single upload is capped at **750 rows** (`MAX_ROWS`) so it
+  finishes inside the request limit. Split larger files, or run the CLI locally
+  for unlimited batches.
+- The summary pills show the **row count and number of API calls** — duplicate
+  names are looked up only once, so calls ≤ rows.
+
+> The link above is the current preview deployment for this branch. After you
+> merge to `main`, Vercel will also give you a stable production URL you can
+> share instead.
 
 ## How it works
 
