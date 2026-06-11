@@ -1,0 +1,40 @@
+name: Generate restaurant status
+
+# Run manually from the Actions tab. Reads the API key from a GitHub Secret,
+# processes restaurants.csv, and uploads restaurant_status.csv as an artifact.
+on:
+  workflow_dispatch:
+    inputs:
+      input_file:
+        description: "Input CSV committed to the repo"
+        default: "restaurants.csv"
+        required: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run places bot
+        env:
+          # Define this in: repo Settings -> Secrets and variables -> Actions.
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+        run: |
+          python -m places_bot \
+            --input "${{ github.event.inputs.input_file }}" \
+            --output restaurant_status.csv \
+            --yes
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: restaurant-status
+          path: restaurant_status.csv
