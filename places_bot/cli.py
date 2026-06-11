@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import config, processor, service
+from . import config, fields as fields_mod, processor, service
 from .client import PlacesClient
 from .usage import UsageTracker
 
@@ -34,6 +34,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--region-code", default=config.DEFAULT_REGION_CODE)
     p.add_argument("--language-code", default=config.DEFAULT_LANGUAGE_CODE)
+    p.add_argument(
+        "--fields",
+        default=None,
+        help=(
+            "Comma-separated output fields (Pro tier). Default: "
+            f"{','.join(fields_mod.DEFAULT_FIELD_IDS)}. "
+            f"Available: {','.join(fields_mod.FIELD_BY_ID)}."
+        ),
+    )
     p.add_argument(
         "--threshold",
         type=int,
@@ -115,6 +124,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"Using '{query_col}' as the query column.", file=sys.stderr)
 
+    field_ids = [f.strip() for f in args.fields.split(",")] if args.fields else None
+    fields = fields_mod.resolve_fields(field_ids)
+
     # Work out the unique queries so we can estimate cost before running.
     queries = [
         service.full_query(r.get(query_col) or "", args.suffix)
@@ -131,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
 
     client = PlacesClient(
         api_key=api_key,
+        field_mask=fields_mod.build_field_mask(fields),
         region_code=args.region_code,
         language_code=args.language_code,
     )
@@ -147,29 +160,39 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    calls_made = service.lookup_statuses(
+    result = service.lookup_statuses(
         rows,
         query_col,
         suffix=args.suffix,
         client=client,
+        fields=fields,
         dedupe=not args.no_dedupe,
         max_workers=1,  # sequential keeps CLI progress output in order
         on_result=on_result,
     )
 
     try:
-        processor.write_rows(args.output, fieldnames, rows)
+        processor.write_rows(args.output, fieldnames, rows, fields)
     except OSError as exc:
         print(f"Error writing {args.output}: {exc}", file=sys.stderr)
         return 2
 
-    month_total = tracker.add(calls_made)
+    month_total = tracker.add(result.api_calls)
     print(
         f"\nDone. Wrote {len(rows)} rows to {args.output}.\n"
-        f"API calls this run: {calls_made}. "
+        f"API calls this run: {result.api_calls}. "
         f"Estimated calls this month (local): {month_total}.",
         file=sys.stderr,
     )
+    if result.error_count:
+        reasons = ", ".join(
+            f"{n}× {r}" for r, n in sorted(result.error_reasons.items())
+        )
+        print(
+            f"⚠️  {result.error_count} row(s) had problems ({reasons}). "
+            f"'quota' means you may have hit your Google API limit.",
+            file=sys.stderr,
+        )
     return 0
 
 

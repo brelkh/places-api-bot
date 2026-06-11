@@ -36,35 +36,43 @@ maps the API result to output columns → rows are written back to CSV.
 
 | Path | What lives here |
 | --- | --- |
-| `places_bot/config.py` | Constants + `get_api_key()`. **`FIELD_MASK`** (see invariants), endpoint URL, defaults, threshold. |
-| `places_bot/client.py` | `PlacesClient` — Text Search call, retry/backoff, **thread-local sessions** (concurrency-safe). |
-| `places_bot/service.py` | `lookup_statuses()` — dedupe + optional concurrency. The shared engine. |
-| `places_bot/processor.py` | CSV read/write (file + in-memory), `summarize_places`, `detect_query_column`, `OUTPUT_COLUMNS`, `BUSINESS_STATUS_LABELS`. |
-| `places_bot/cli.py` | argparse CLI, cost-threshold prompt, progress output, usage tracking. |
+| `places_bot/fields.py` | **Field catalog** — Pro-tier `FieldSpec`s, `resolve_fields`, `build_field_mask`, `field_columns`, status labels. The whitelist that caps the pricing tier. |
+| `places_bot/config.py` | Constants + `get_api_key()`. `FIELD_MASK` (default selection), endpoint URL, defaults, threshold. |
+| `places_bot/client.py` | `PlacesClient` — Text Search call, retry/backoff, **thread-local sessions**. `PlacesAPIError.reason` + `classify_error` (quota/auth/invalid_request/network). |
+| `places_bot/service.py` | `lookup_statuses()` (dedupe + concurrency, returns `LookupSummary` with error reasons) and `probe_key()`. The shared engine. |
+| `places_bot/processor.py` | CSV read/write (file + in-memory). `summarize_places`/`error_summary`/`output_fieldnames`/`rows_to_csv` all take `fields`. `detect_query_column`. |
+| `places_bot/cli.py` | argparse CLI (`--fields`), cost-threshold prompt, progress, usage tracking, error summary. |
 | `places_bot/usage.py` | `UsageTracker` — best-effort local monthly call counter (`.places_usage.json`). |
-| `api/process.py` | Flask serverless function for Vercel. Password gate → `lookup_statuses` → JSON + CSV. |
-| `public/index.html` | Vanilla-JS single-page UI (no build step). |
+| `api/process.py` | Flask function for Vercel. 3 routes: `GET /api/fields`, `POST /api/verify` (password→token, rate-limited), `POST /api/process`. User-key fallback via `probe_key`. In-memory `RateLimiter`. |
+| `public/index.html` | Vanilla-JS single-page UI (no build step). Verifies password first, then uploads. |
 | `vercel.json` | Bundles `places_bot/**` with the function, 60s `maxDuration`. |
 | `tests/` | `test_processor.py`, `test_service.py`, `test_cli.py`, `test_web.py`. All stub the network. |
 | `.github/workflows/places-status.yml` | `workflow_dispatch` CI run that uploads the output CSV as an artifact. |
 
 ## Invariants — don't break these
 
-1. **Field mask stays in the Pro pricing tier.** `config.FIELD_MASK` requests
-   only IDs-only/Pro fields. Adding opening-hours / rating / phone / website
-   fields bumps every call into the pricing **Enterprise** tier. `businessStatus`
-   (Pro) already gives open/temp-closed/perm-closed. If you add a field, verify
-   its tier first and keep cost in mind.
-2. **One engine.** CLI and web both go through `service.lookup_statuses`. Keep it
-   that way.
+1. **Output fields stay in the Pro pricing tier.** All selectable fields live in
+   `places_bot/fields.py::FIELD_CATALOG` (IDs-only/Pro only). Callers pick fields
+   **by id**, and `resolve_fields` ignores unknown ids — so a request can never
+   escalate into the pricier **Enterprise** tier (opening hours, phone, rating,
+   website). To add a field: add a `FieldSpec` with its mask + extractor, after
+   verifying it is Pro/IDs-only. Never add an Enterprise field here.
+2. **One engine.** CLI and web both go through `service.lookup_statuses`, which is
+   field-driven (`summarize_places`/`error_summary`/CSV helpers all take the
+   resolved `fields`). Keep it that way.
 3. **Concurrency safety.** The web path runs `search_text` across threads. The
-   client keeps a `requests.Session` per thread (`threading.local`). If you touch
-   the client, don't introduce shared mutable state across threads.
+   client keeps a `requests.Session` per thread (`threading.local`). Don't add
+   shared mutable state across threads (the rate limiter uses a lock).
 4. **Secrets via env, never committed.** `GOOGLE_MAPS_API_KEY` (CLI + web) and
-   `APP_PASSWORD` (web). Local: `.env` / shell. Vercel: dashboard env vars. CI:
-   GitHub Secrets. `.env` and `restaurant_status.csv` are git-ignored.
-5. **Dedupe = cost control.** Identical queries are looked up once. The summary
-   reports `api_calls`; expect `calls ≤ rows`.
+   `APP_PASSWORD` (web; also signs the verify token). Local: `.env` / shell.
+   Vercel: dashboard env vars. CI: GitHub Secrets. `.env` and
+   `restaurant_status.csv` are git-ignored.
+5. **Dedupe = cost control.** Identical queries are looked up once. `LookupSummary.
+   api_calls` ≤ rows (+1 if a user key is probed).
+6. **Auth before upload.** The browser calls `POST /api/verify` first and only
+   uploads the CSV on success; the server still re-checks (token or password) on
+   `POST /api/process`. Keep this order — don't let `/api/process` parse a body
+   before authorizing.
 
 ## Commands
 
@@ -106,8 +114,9 @@ After making a code change, do these in order:
   Vercel serves `public/` at `/` and `api/*.py` as functions automatically.
 - **`MAX_ROWS` (default 750)** caps a single web upload so it finishes inside the
   60s Vercel timeout. Large batches → split, or use the CLI (uncapped).
-- **Output columns** are defined once in `processor.OUTPUT_COLUMNS`; the web UI
-  renders whatever columns come back, so add new output there.
+- **Output columns** come from the selected `FieldSpec`s (`fields.field_columns`);
+  the web UI renders whatever columns come back. To add output, add a `FieldSpec`
+  in `fields.py` (see invariant #1).
 - **Pushing:** on the user's local machine the git remote is `github.com` over
   HTTPS with no stored creds — the user pushes; an in-session sandbox pushes via
   its proxy. Don't assume you can `git push`.

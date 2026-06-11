@@ -9,29 +9,18 @@ from __future__ import annotations
 
 import os
 
+from . import fields as fields_mod
+
 # Endpoint for Places API (New) Text Search.
 SEARCH_TEXT_URL = "https://places.googleapis.com/v1/places:searchText"
 
-# Field mask.
+# Default field mask: the default selection from the Pro-tier catalog.
 #
-# IMPORTANT (cost control): every field below is in the "IDs Only" or "Pro"
-# pricing tier. We intentionally do NOT request opening-hours fields
-# (e.g. places.currentOpeningHours / places.regularOpeningHours) because those
-# are in the higher-priced **Enterprise** tier. `places.businessStatus` already
-# tells us OPERATIONAL / CLOSED_TEMPORARILY / CLOSED_PERMANENTLY, which is the
-# information this tool needs.
-#
-# If you ever add fields here, check the tier first:
-# https://developers.google.com/maps/documentation/places/web-service/place-data-fields
-FIELD_MASK = ",".join(
-    [
-        "places.id",  # IDs-only tier
-        "places.displayName",  # Pro tier — lets you verify the match
-        "places.formattedAddress",  # Pro tier — lets you verify the match
-        "places.businessStatus",  # Pro tier — the field we actually need
-        "places.googleMapsUri",  # Pro tier — Google Maps link for spot checks
-    ]
-)
+# IMPORTANT (cost control): the catalog in places_bot/fields.py contains only
+# "IDs Only" and "Pro" tier fields — never opening-hours / phone / rating /
+# website, which sit in the pricier **Enterprise** tier. Callers choose fields
+# by id from that catalog, so a request can never escalate the pricing tier.
+FIELD_MASK = fields_mod.build_field_mask(fields_mod.resolve_fields())
 
 # Defaults for the search request body.
 DEFAULT_REGION_CODE = "SG"

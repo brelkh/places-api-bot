@@ -12,7 +12,40 @@ from . import config
 
 
 class PlacesAPIError(RuntimeError):
-    """Raised when the Places API returns an unrecoverable error."""
+    """Raised when the Places API returns an unrecoverable error.
+
+    `reason` is a coarse classification used to give users an actionable
+    message: "quota", "auth", "invalid_request", "network", or "unknown".
+    """
+
+    def __init__(
+        self, message: str, *, reason: str = "unknown", http_status: int | None = None
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.http_status = http_status
+
+
+def classify_error(status_code: int | None, body: str) -> str:
+    """Map an HTTP status + Google error body to a coarse reason."""
+    status_text = ""
+    try:
+        import json
+
+        status_text = (json.loads(body).get("error") or {}).get("status", "")
+    except (ValueError, AttributeError):
+        pass
+
+    if status_code == 429 or status_text == "RESOURCE_EXHAUSTED":
+        return "quota"
+    if status_code in (401, 403) or status_text in (
+        "PERMISSION_DENIED",
+        "UNAUTHENTICATED",
+    ):
+        return "auth"
+    if status_code == 400 or status_text == "INVALID_ARGUMENT":
+        return "invalid_request"
+    return "unknown"
 
 
 class PlacesClient:
@@ -66,7 +99,9 @@ class PlacesClient:
         }
 
         last_error: str | None = None
+        last_status: int | None = None
         for attempt in range(self.max_retries):
+            is_last = attempt == self.max_retries - 1
             try:
                 resp = self._session.post(
                     config.SEARCH_TEXT_URL,
@@ -75,24 +110,39 @@ class PlacesClient:
                     timeout=self.timeout,
                 )
             except requests.RequestException as exc:
-                last_error = f"network error: {exc}"
+                last_error, last_status = f"network error: {exc}", None
+                if is_last:
+                    break
                 self._sleep_backoff(attempt)
                 continue
 
             if resp.status_code == 200:
                 return resp.json().get("places", [])
 
+            last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
+            last_status = resp.status_code
+
             # Rate limited or transient server error -> back off and retry.
             if resp.status_code == 429 or resp.status_code >= 500:
-                last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
+                if is_last:
+                    break
                 self._sleep_backoff(attempt)
                 continue
 
             # Other 4xx errors are not retryable (bad key, bad request, etc.).
-            raise PlacesAPIError(f"HTTP {resp.status_code}: {resp.text[:500]}")
+            raise PlacesAPIError(
+                f"HTTP {resp.status_code}: {resp.text[:500]}",
+                reason=classify_error(resp.status_code, resp.text),
+                http_status=resp.status_code,
+            )
 
+        reason = (
+            classify_error(last_status, "") if last_status is not None else "network"
+        )
         raise PlacesAPIError(
-            f"Giving up after {self.max_retries} attempts. Last error: {last_error}"
+            f"Giving up after {self.max_retries} attempt(s). Last error: {last_error}",
+            reason=reason,
+            http_status=last_status,
         )
 
     @staticmethod
