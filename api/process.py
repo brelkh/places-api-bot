@@ -6,6 +6,10 @@ Endpoints (Flask WSGI app, served by Vercel as the module-level ``app``):
     POST /api/verify    check the shared password BEFORE any CSV is uploaded;
                         returns a short-lived token. Rate-limited per IP.
     POST /api/process   run the lookups (token- or password-gated)
+                        • multipart/form-data: legacy single-shot CSV upload
+                        • application/json: chunked JSON lookup mode used by
+                          the browser's chunk loop (queries=[...], fields=[...])
+                          or a one-time key probe (probe_only=true)
 
 Environment variables (set in the Vercel dashboard):
 
@@ -69,12 +73,16 @@ class RateLimiter:
         self._hits: dict[str, list[float]] = {}
         self._lock = threading.Lock()
 
-    def check(self, key: str) -> tuple[bool, int]:
-        """Record a hit. Returns (allowed, retry_after_seconds)."""
+    def check(self, key: str, n: int = 1) -> tuple[bool, int]:
+        """Record n hits. Returns (allowed, retry_after_seconds).
+
+        Stores one timestamp entry per unit (row). This allows the process
+        limiter to count rows rather than requests.
+        """
         now = time.time()
         with self._lock:
             hits = [t for t in self._hits.get(key, []) if now - t < self.window]
-            hits.append(now)
+            hits.extend([now] * n)
             self._hits[key] = hits
             if len(hits) > self.max_events:
                 return False, int(self.window - (now - hits[0])) + 1
@@ -87,8 +95,9 @@ class RateLimiter:
 
 # Wrong-password attempts: 5 per 10 minutes per IP.
 _login_limiter = RateLimiter(max_events=5, window_seconds=600)
-# Total processing calls: 40 per 10 minutes per IP (caps Vercel/API usage).
-_process_limiter = RateLimiter(max_events=40, window_seconds=600)
+# Row budget: 5,000 rows per 10 minutes per IP (caps Vercel/API usage).
+# Very large batches should use the CLI (uncapped).
+_process_limiter = RateLimiter(max_events=5000, window_seconds=600)
 
 
 def _client_ip() -> str:
@@ -136,8 +145,10 @@ def _is_authorized() -> bool:
     token = request.headers.get("X-App-Token", "")
     if token and _token_valid(token):
         return True
-    given = request.headers.get("X-App-Password", "") or request.form.get(
-        "password", ""
+    given = (
+        request.headers.get("X-App-Password", "")
+        or request.form.get("password", "")
+        or (request.get_json(silent=True) or {}).get("password", "")
     )
     return _password_matches(given)
 
@@ -198,8 +209,38 @@ def _handle_process():
     if not _is_authorized():
         return _error("Unauthorized. Enter the access password first.", 401)
 
+    if request.is_json:
+        return _handle_process_json()
+    return _handle_process_multipart()
+
+
+# --------------------------------------------------------------------------- #
+# JSON lookup mode (used by the browser's chunk loop)
+# --------------------------------------------------------------------------- #
+def _handle_process_json():
+    data = request.get_json(silent=True) or {}
+
+    # One-time key pre-check used by the browser before the chunk loop starts.
+    # Not rate-limited — it's a single cheap IDs-only call.
+    if data.get("probe_only"):
+        chosen_key, key_used, key_warning, _, err = _choose_key_json(data)
+        if err is not None:
+            return err
+        return jsonify({"key_used": key_used, "key_warning": key_warning})
+
+    queries = data.get("queries")
+    if not isinstance(queries, list):
+        return _error("'queries' must be a list of names.", 400)
+    if not queries:
+        return _error("'queries' is empty.", 400)
+    if len(queries) > MAX_ROWS:
+        return _error(
+            f"Too many queries ({len(queries)}). Max per request is {MAX_ROWS}.",
+            413,
+        )
+
     ip = _client_ip()
-    allowed, retry_after = _process_limiter.check(ip)
+    allowed, retry_after = _process_limiter.check(ip, n=len(queries))
     if not allowed:
         return _error(
             f"Rate limit reached. Try again in {retry_after} seconds.",
@@ -207,7 +248,91 @@ def _handle_process():
             retry_after=retry_after,
         )
 
-    # --- read + validate the CSV ---
+    field_ids = data.get("fields") or None
+    fields = fields_mod.resolve_fields(field_ids)
+
+    chosen_key, key_used, key_warning, probe_calls, err = _choose_key_json(data)
+    if err is not None:
+        return err
+
+    places_client = PlacesClient(
+        api_key=chosen_key, field_mask=fields_mod.build_field_mask(fields)
+    )
+    # Browser already deduped; pass each name as its own pseudo-row.
+    pseudo_rows = [{"q": name} for name in queries]
+    summary = service.lookup_statuses(
+        pseudo_rows,
+        "q",
+        suffix=config.DEFAULT_QUERY_SUFFIX,
+        client=places_client,
+        fields=fields,
+        dedupe=False,
+        max_workers=MAX_WORKERS,
+    )
+
+    results = []
+    for name, row in zip(queries, pseudo_rows):
+        result = {"query": name}
+        result.update({k: v for k, v in row.items() if k != "q"})
+        results.append(result)
+
+    return jsonify(
+        {
+            "results": results,
+            "api_calls": summary.api_calls + probe_calls,
+            "error_count": summary.error_count,
+            "error_reasons": summary.error_reasons,
+            "key_used": key_used,
+            "key_warning": key_warning,
+        }
+    )
+
+
+def _choose_key_json(data: dict):
+    """Returns (api_key, key_used, key_warning, probe_calls, error_response)."""
+    user_key = (data.get("api_key") or "").strip()
+    server_key = os.environ.get(config.API_KEY_ENV_VAR, "").strip()
+
+    if not user_key:
+        if not server_key:
+            return None, None, None, 0, _error(
+                "No API key available. Provide your own key, or ask the owner "
+                "to configure the server key.",
+                500,
+            )
+        return server_key, "the app's key", None, 0, None
+
+    # skip_probe=True means the browser already validated this key with a
+    # probe_only call before the chunk loop; trust it without re-probing.
+    if data.get("skip_probe"):
+        return user_key, "your key", None, 0, None
+
+    # Probe the key with one cheap IDs-only call.
+    probe_error = service.probe_key(
+        user_key,
+        region_code=config.DEFAULT_REGION_CODE,
+        language_code=config.DEFAULT_LANGUAGE_CODE,
+    )
+    if probe_error is None:
+        return user_key, "your key", None, 1, None
+
+    reason = REASON_TEXT.get(probe_error.reason, probe_error.reason)
+    if server_key:
+        warning = (
+            f"Your API key wasn't used — {reason}. "
+            f"Fell back to the app's key for this run."
+        )
+        return server_key, "the app's key (your key failed)", warning, 1, None
+    return None, None, None, 1, _error(
+        f"Your API key failed ({reason}) and the server has no fallback key.", 502
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Multipart (legacy single-shot CSV upload, kept for tests + fallback)
+# --------------------------------------------------------------------------- #
+def _handle_process_multipart():
+    # --- read + validate the CSV first (needed to count rows for rate limit) ---
     upload = request.files.get("file")
     if upload is None or not upload.filename:
         return _error("No CSV uploaded (the form field must be named 'file').", 400)
@@ -228,6 +353,15 @@ def _handle_process():
             413,
         )
 
+    ip = _client_ip()
+    allowed, retry_after = _process_limiter.check(ip, n=len(rows))
+    if not allowed:
+        return _error(
+            f"Rate limit reached. Try again in {retry_after} seconds.",
+            429,
+            retry_after=retry_after,
+        )
+
     query_column = request.form.get("query_column") or None
     query_col = query_column or processor.detect_query_column(fieldnames)
     if query_col not in fieldnames:
@@ -245,11 +379,11 @@ def _handle_process():
     if err is not None:
         return err
 
-    client = PlacesClient(
+    places_client = PlacesClient(
         api_key=chosen_key, field_mask=fields_mod.build_field_mask(fields)
     )
     summary = service.lookup_statuses(
-        rows, query_col, suffix=suffix, client=client, fields=fields,
+        rows, query_col, suffix=suffix, client=places_client, fields=fields,
         dedupe=True, max_workers=MAX_WORKERS,
     )
 

@@ -43,8 +43,8 @@ maps the API result to output columns → rows are written back to CSV.
 | `places_bot/processor.py` | CSV read/write (file + in-memory). `summarize_places`/`error_summary`/`output_fieldnames`/`rows_to_csv` all take `fields`. `detect_query_column`. |
 | `places_bot/cli.py` | argparse CLI (`--fields`), cost-threshold prompt, progress, usage tracking, error summary. |
 | `places_bot/usage.py` | `UsageTracker` — best-effort local monthly call counter (`.places_usage.json`). |
-| `api/process.py` | Flask function for Vercel. 3 routes: `GET /api/fields`, `POST /api/verify` (password→token, rate-limited), `POST /api/process`. User-key fallback via `probe_key`. In-memory `RateLimiter`. |
-| `public/index.html` | Vanilla-JS single-page UI (no build step). Verifies password first, then uploads. |
+| `api/process.py` | Flask function for Vercel. 3 routes: `GET /api/fields`, `POST /api/verify` (password→token, rate-limited), `POST /api/process` (multipart legacy + JSON chunk mode + JSON `probe_only` key check). In-memory `RateLimiter` (counts rows, not requests). |
+| `public/index.html` | Vanilla-JS single-page UI (no build step). Owns CSV parse/dedupe/chunk/merge entirely — the server is stateless between chunks. Verifies password first, then processes. |
 | `vercel.json` | Bundles `places_bot/**` with the function, 60s `maxDuration`. |
 | `tests/` | `test_processor.py`, `test_service.py`, `test_cli.py`, `test_web.py`. All stub the network. |
 | `.github/workflows/places-status.yml` | `workflow_dispatch` CI run that uploads the output CSV as an artifact. |
@@ -119,8 +119,23 @@ After making a code change, do these in order:
   it (it covers `/api/(.*)`, so you're fine). Don't add a second `api/*.py`
   expecting the in-memory rate limiter to be shared — separate functions are
   separate instances.
-- **`MAX_ROWS` (default 750)** caps a single web upload so it finishes inside the
-  60s Vercel timeout. Large batches → split, or use the CLI (uncapped).
+- **`MAX_ROWS` (default 750)** caps a single JSON chunk or multipart upload so
+  it finishes inside the 60s Vercel timeout. The browser sends ≤75 queries per
+  chunk, well under this cap. Very large batches (e.g. 20k rows) → use the CLI
+  (uncapped).
+- **Browser owns CSV parse/dedupe/chunk/merge.** The frontend parses the CSV
+  (RFC 4180, BOM-aware), detects the query column, deduplicates, and sends at
+  most 75 unique queries per `POST /api/process` JSON request. The server is
+  stateless between chunks. Merging and final CSV generation happen in the
+  browser after all chunks complete.
+- **Row-counting rate limiter.** `_process_limiter` counts rows (not requests):
+  5 000 rows / 10 min per IP. Each JSON chunk charges `len(queries)` rows;
+  multipart charges `len(rows)` rows. `_login_limiter` is unchanged (5 attempts
+  per 10 min).
+- **BYO-key under chunking.** The browser does a single `probe_only: true`
+  request before the chunk loop. If accepted, subsequent chunks pass
+  `skip_probe: true` (trusting the already-validated key). This avoids
+  re-probing on every chunk.
 - **Output columns** come from the selected `FieldSpec`s (`fields.field_columns`);
   the web UI renders whatever columns come back. To add output, add a `FieldSpec`
   in `fields.py` (see invariant #1).

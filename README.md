@@ -35,11 +35,17 @@ CSV; the CLI reads `restaurants.csv` and writes `restaurant_status.csv`.
 4. *(Optional)* Expand **Use your own Google API key** to run on your own key —
    it's tried first and falls back to the app's key if it fails (you're told
    why). It's used only for that request and never stored.
-5. Click **Look up statuses**. Results appear as a colour-coded table —
+5. Click **Look up statuses**. The app processes your file in chunks of 75
+   queries and shows a **live progress bar** ("X / N looked up · %"). Click
+   **Cancel** at any time to stop after the current chunk — partial results are
+   still shown and downloadable.
+6. Results appear as a colour-coded table —
    <kbd>Open</kbd>, <kbd>Temporarily closed</kbd>, <kbd>Permanently closed</kbd>,
    plus `Not found` / `Unknown` / `Error` when applicable. A banner warns you if
-   lookups failed and **why** (e.g. quota/limit exceeded, key rejected).
-6. Click **Download CSV** to save the full results (`restaurant_status.csv`).
+   lookups failed and **why** (e.g. quota/limit exceeded, key rejected). Duplicate
+   names in your CSV are looked up only once; a pill shows how many rows were
+   skipped.
+7. Click **Download CSV** to save the full results (`restaurant_status.csv`).
 
 ### Tips
 
@@ -50,11 +56,18 @@ CSV; the CLI reads `restaurants.csv` and writes `restaurant_status.csv`.
   place was matched, and use the **map ↗** link to eyeball it on Google Maps.
 - **`Not found`** usually means the name was too vague or misspelled — try
   adding the mall, street, or neighbourhood.
-- **Big lists:** a single upload is capped at **750 rows** (`MAX_ROWS`) so it
-  finishes inside the request limit. Split larger files, or run the CLI locally
-  for unlimited batches.
-- The summary pills show the **row count and number of API calls** — duplicate
-  names are looked up only once, so calls ≤ rows.
+- **Duplicate rows:** identical query values are looked up once; a summary pill
+  shows how many duplicate rows were skipped.
+- **Large files (up to ~1 000 rows):** the web app handles them automatically
+  via client-side chunking (75 queries per request). If you have more than 1 000
+  unique names, you'll be asked to confirm the estimated API-call cost before
+  processing starts.
+- **Very large batches (e.g. 20 000 rows):** use the CLI locally — it is
+  uncapped and processes the whole file in one run.
+- **Rate limit:** the web app allows up to **5 000 rows per 10 minutes** per IP.
+  Large jobs that need more should use the CLI.
+- The summary pills show the **row count, number of API calls, and duplicates
+  skipped** — calls ≤ unique queries.
 
 ## How it works
 
@@ -177,21 +190,24 @@ Endpoints in `api/process.py`:
 | --- | --- |
 | `GET /api/fields` | the selectable Pro-tier field catalog (drives the checkboxes) |
 | `POST /api/verify` | checks the password **before** any CSV upload; returns a short-lived signed token. Rate-limited per IP. |
-| `POST /api/process` | runs the lookups; gated by the token (or password) |
+| `POST /api/process` | runs the lookups; gated by the token (or password). Accepts **multipart** (legacy single-shot CSV) or **JSON** (`{ "queries": [...], "fields": [...] }` for the browser's chunk loop; `{ "probe_only": true }` for a one-time key pre-check). |
 
-The function looks up statuses **concurrently** (`PLACES_MAX_WORKERS`, default 8)
-so a CSV finishes inside the request timeout, and your API key never leaves the
-server.
+The browser **parses the CSV and deduplicates queries client-side**, then sends
+them to the server in chunks of 75. Each chunk is a JSON `POST /api/process`
+request; the server keeps the `" singapore"` suffix, runs lookups concurrently
+(`PLACES_MAX_WORKERS`, default 8), and returns results for that chunk. The
+browser merges all chunks back into the original row order and builds the output
+CSV — your API key never leaves the server.
 
 ### Abuse protection
 
 `POST /api/verify` is rate-limited per IP (5 wrong passwords / 10 min → `429`),
-and `POST /api/process` is capped per IP to limit Vercel/API usage. **This
-limiter is in-memory and per-instance** — because Vercel runs many ephemeral
-instances it slows casual attacks but is not a hard guarantee. For real
-protection, enable **Vercel Firewall / Attack Challenge Mode** (Project →
-Settings → Firewall) and use a strong `APP_PASSWORD`. Uploads are also capped at
-4 MB.
+and `POST /api/process` is capped per IP at **5 000 rows per 10 minutes**
+(counting the rows in every request, JSON or multipart). **This limiter is
+in-memory and per-instance** — because Vercel runs many ephemeral instances it
+slows casual attacks but is not a hard guarantee. For real protection, enable
+**Vercel Firewall / Attack Challenge Mode** (Project → Settings → Firewall) and
+use a strong `APP_PASSWORD`. Uploads are also capped at 4 MB.
 
 ### Deploy
 
@@ -218,8 +234,10 @@ python api/process.py            # serves the API on http://localhost:5000
 
 ### Limits
 
-`MAX_ROWS` caps a single upload (default 750) so a request can't outrun Vercel's
-60s timeout. For bigger batches, split the file or use the CLI locally.
+`MAX_ROWS` (default 750) caps a single JSON chunk or multipart upload so a
+request can't outrun Vercel's 60s timeout. The browser sends at most 75 queries
+per chunk, which sits well under this cap. For very large batches (e.g. 20k
+rows), use the CLI locally — it is uncapped.
 
 ## Tests
 
