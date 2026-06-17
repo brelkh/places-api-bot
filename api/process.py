@@ -255,9 +255,7 @@ def _handle_process_json():
     if err is not None:
         return err
 
-    places_client = PlacesClient(
-        api_key=chosen_key, field_mask=fields_mod.build_field_mask(fields)
-    )
+    places_client = PlacesClient(api_key=chosen_key)
     # Browser already deduped; pass each name as its own pseudo-row.
     pseudo_rows = [{"q": name} for name in queries]
     summary = service.lookup_statuses(
@@ -379,9 +377,7 @@ def _handle_process_multipart():
     if err is not None:
         return err
 
-    places_client = PlacesClient(
-        api_key=chosen_key, field_mask=fields_mod.build_field_mask(fields)
-    )
+    places_client = PlacesClient(api_key=chosen_key)
     summary = service.lookup_statuses(
         rows, query_col, suffix=suffix, client=places_client, fields=fields,
         dedupe=True, max_workers=MAX_WORKERS,

@@ -15,7 +15,7 @@ from typing import Callable
 
 from . import processor
 from .client import PlacesAPIError, PlacesClient
-from .fields import FieldSpec
+from .fields import FieldSpec, build_details_field_mask
 
 
 @dataclass
@@ -63,9 +63,21 @@ def lookup_statuses(
     order), which the CLI uses for progress output.
     """
 
+    # Pre-compute the Place Details field mask once for all calls in this batch.
+    detail_mask = build_details_field_mask(fields)
+
     def call(query: str) -> tuple[dict[str, str], str | None]:
         try:
-            return processor.summarize_places(client.search_text(query), fields), None
+            # Step 1: Text Search IDs-only (free tier) — get the place ID.
+            id_results = client.search_text(query)
+            if not id_results:
+                return processor.summarize_places([], fields), None
+            place_id = id_results[0].get("id", "")
+            if not place_id:
+                return processor.summarize_places([], fields), None
+            # Step 2: Place Details (Pro tier) — fetch the requested fields.
+            place = client.get_place_details(place_id, detail_mask)
+            return processor.summarize_places([place], fields), None
         except PlacesAPIError as exc:
             return processor.error_summary(fields, str(exc)), exc.reason
 

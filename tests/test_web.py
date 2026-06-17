@@ -9,15 +9,13 @@ from api import process as web  # noqa: E402
 
 
 FAKE = {
-    "McDonald's ARC singapore": [
-        {
-            "businessStatus": "OPERATIONAL",
-            "displayName": {"text": "McDonald's"},
-            "formattedAddress": "1 Alexandra Rd",
-            "googleMapsUri": "https://maps.google.com/x",
-        }
-    ],
-    "Gone Forever singapore": [{"businessStatus": "CLOSED_PERMANENTLY"}],
+    "McDonald's ARC singapore": {
+        "businessStatus": "OPERATIONAL",
+        "displayName": {"text": "McDonald's"},
+        "formattedAddress": "1 Alexandra Rd",
+        "googleMapsUri": "https://maps.google.com/x",
+    },
+    "Gone Forever singapore": {"businessStatus": "CLOSED_PERMANENTLY"},
 }
 
 
@@ -27,9 +25,14 @@ def client(monkeypatch):
     monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "key")
 
     def fake_search(self, query):
-        return FAKE.get(query, [])
+        # IDs-only step: return the query string as the fake place ID.
+        return [{"id": query}] if query in FAKE else []
+
+    def fake_details(self, place_id, detail_field_mask):
+        return FAKE.get(place_id, {})
 
     monkeypatch.setattr(PlacesClient, "search_text", fake_search)
+    monkeypatch.setattr(PlacesClient, "get_place_details", fake_details)
     # fresh limiter state per test
     web._login_limiter._hits.clear()
     web._process_limiter._hits.clear()

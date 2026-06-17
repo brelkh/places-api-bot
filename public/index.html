@@ -140,6 +140,38 @@
       .progress-fill { background: var(--brand); height: 100%; width: 0%; transition: width 0.25s ease; }
       .foot { color: var(--muted); font-size: 13px; margin-top: 26px; text-align: center; }
       .foot code { background: #eef2f7; padding: 1px 6px; border-radius: 5px; }
+      .usage-header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; }
+      .usage-title { font-weight:700; font-size:15px; }
+      .usage-stats { display:flex; gap:0; margin-top:16px; flex-wrap:wrap; }
+      .usage-stat { flex:1; min-width:120px; }
+      .usage-stat-label { font-size:12px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:4px; }
+      .usage-stat-value { font-size:32px; font-weight:700; letter-spacing:-0.03em; line-height:1.1; }
+      .usage-stat-divider { width:1px; background:var(--line); margin:0 24px; }
+      .usage-tiers { margin-top:16px; }
+      .usage-tier-row { display:flex; align-items:center; gap:8px; padding:5px 0; font-size:13px; color:var(--muted); }
+      .usage-tier-row + .usage-tier-row { border-top:1px solid var(--line); }
+      .usage-tier-active { color:var(--ink); font-weight:600; }
+      .usage-tier-dot { width:8px; height:8px; border-radius:50%; background:var(--line); flex-shrink:0; }
+      .usage-tier-active .usage-tier-dot { background:var(--brand); }
+      .usage-tier-range { flex:1; }
+      .usage-tier-rate { min-width:130px; text-align:right; }
+      .usage-tier-note { color:var(--brand); font-size:12px; white-space:nowrap; margin-left:6px; }
+      .modal-overlay {
+        position:fixed; inset:0; background:rgba(16,24,40,0.5); display:flex;
+        align-items:center; justify-content:center; z-index:1000; padding:20px;
+        backdrop-filter:blur(2px); -webkit-backdrop-filter:blur(2px);
+      }
+      .modal-box {
+        background:var(--card); border-radius:var(--radius); padding:28px 24px 22px;
+        max-width:420px; width:100%;
+        box-shadow:0 20px 60px rgba(16,24,40,0.25);
+      }
+      .modal-box h3 { margin:0 0 14px; font-size:17px; letter-spacing:-0.01em; }
+      .modal-body { font-size:14px; line-height:1.6; color:var(--ink); }
+      .modal-body p { margin:0 0 10px; }
+      .modal-body p:last-child { margin-bottom:0; }
+      .modal-actions { display:flex; gap:10px; margin-top:22px; }
+      .modal-actions button { flex:1; }
     </style>
   </head>
   <body>
@@ -151,6 +183,28 @@
           Maps business status.
         </p>
       </header>
+
+      <div class="card" id="usageCard">
+        <div class="usage-header">
+          <div>
+            <div class="usage-title">Monthly API Usage</div>
+            <div id="usageMonth" style="color:var(--muted);font-size:13px;margin-top:2px"></div>
+          </div>
+          <button type="button" id="resetUsage" class="ghost" style="font-size:12px;padding:5px 10px">Reset</button>
+        </div>
+        <div class="usage-stats">
+          <div class="usage-stat">
+            <div class="usage-stat-label">Queries this month</div>
+            <div class="usage-stat-value" id="usageCount">0</div>
+          </div>
+          <div class="usage-stat-divider"></div>
+          <div class="usage-stat">
+            <div class="usage-stat-label">Estimated cost</div>
+            <div class="usage-stat-value" id="usageCost">$0.00</div>
+          </div>
+        </div>
+        <div class="usage-tiers" id="usageTiers"></div>
+      </div>
 
       <form id="form" class="card">
         <div class="field">
@@ -244,6 +298,20 @@
       </p>
     </div>
 
+    <!-- In-page confirmation modal — replaces window.confirm() so it works on
+         all browsers and is never blocked by popup blockers. -->
+    <div class="modal-overlay hidden" id="costModal"
+         role="dialog" aria-modal="true" aria-labelledby="costModalTitle">
+      <div class="modal-box">
+        <h3 id="costModalTitle"></h3>
+        <div class="modal-body" id="costModalBody"></div>
+        <div class="modal-actions">
+          <button type="button" id="costModalCancel" class="ghost">Cancel</button>
+          <button type="button" id="costModalProceed">Proceed</button>
+        </div>
+      </div>
+    </div>
+
     <script>
       const PREVIEW_LIMIT = 200;
       const CHUNK_SIZE = 75;
@@ -262,6 +330,125 @@
       const QUERY_CANDIDATES = ["query", "restaurant", "restaurant_name", "name"];
 
       const $ = (id) => document.getElementById(id);
+
+      // ── Monthly usage tracker (localStorage, resets automatically each month) ──
+      const USAGE_STORAGE_KEY = "rsl_monthly_usage";
+      const PRICE_TIERS = [
+        { max:       5000, rate: 0,      range: "0 – 5,000",            rateLabel: "Free"            },
+        { max:     100000, rate: 0.032,  range: "5,001 – 100,000",       rateLabel: "$0.032 / query"  },
+        { max:     500000, rate: 0.0256, range: "100,001 – 500,000",     rateLabel: "$0.0256 / query" },
+        { max:    1000000, rate: 0.0192, range: "500,001 – 1,000,000",   rateLabel: "$0.0192 / query" },
+        { max:    5000000, rate: 0.0096, range: "1,000,001 – 5,000,000", rateLabel: "$0.0096 / query" },
+        { max: Infinity,   rate: 0.0024, range: "5,000,001+",            rateLabel: "$0.0024 / query" },
+      ];
+
+      function usageMonthKey() {
+        const d = new Date();
+        return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+      }
+      function loadUsageCount() {
+        try {
+          const parsed = JSON.parse(localStorage.getItem(USAGE_STORAGE_KEY) || "null");
+          return parsed && parsed.month === usageMonthKey() ? (parsed.count || 0) : 0;
+        } catch { return 0; }
+      }
+      function saveUsageCount(n) {
+        try { localStorage.setItem(USAGE_STORAGE_KEY, JSON.stringify({ month: usageMonthKey(), count: n })); } catch {}
+      }
+      function calcMonthlyCost(n) {
+        let cost = 0, rem = n, prev = 0;
+        for (const t of PRICE_TIERS) {
+          const size = t.max === Infinity ? rem : t.max - prev;
+          const used = Math.min(rem, size);
+          cost += used * t.rate;
+          rem -= used;
+          prev = t.max;
+          if (rem <= 0) break;
+        }
+        return cost;
+      }
+      function currentTierIdx(n) {
+        for (let i = 0; i < PRICE_TIERS.length; i++) {
+          if (n <= PRICE_TIERS[i].max) return i;
+        }
+        return PRICE_TIERS.length - 1;
+      }
+      function renderUsageWidget() {
+        const count = loadUsageCount();
+        const cost = calcMonthlyCost(count);
+        const d = new Date();
+        $("usageMonth").textContent = d.toLocaleString("default", { month: "long", year: "numeric" });
+        $("usageCount").textContent = count.toLocaleString();
+        $("usageCost").textContent = "$" + cost.toFixed(2);
+        const idx = currentTierIdx(count);
+        const tiersEl = $("usageTiers");
+        tiersEl.innerHTML = "";
+        PRICE_TIERS.forEach((t, i) => {
+          const active = i === idx;
+          let note = "";
+          if (active) {
+            note = i === 0
+              ? (count === 0 ? "← no queries yet" : `← ${(5000 - count).toLocaleString()} free remaining`)
+              : "← current tier";
+          }
+          const row = document.createElement("div");
+          row.className = "usage-tier-row" + (active ? " usage-tier-active" : "");
+          row.innerHTML = `<div class="usage-tier-dot"></div>`
+            + `<span class="usage-tier-range">${t.range}</span>`
+            + `<span class="usage-tier-rate">${t.rateLabel}</span>`
+            + (note ? `<span class="usage-tier-note">${note}</span>` : "");
+          tiersEl.appendChild(row);
+        });
+      }
+      function addUsageQueries(n) {
+        if (n <= 0) return;
+        saveUsageCount(loadUsageCount() + n);
+        renderUsageWidget();
+      }
+      renderUsageWidget();
+      $("resetUsage").addEventListener("click", () => {
+        if (confirm("Reset the monthly usage counter? This only affects the estimate shown here — your actual Google API usage is tracked in the Google Cloud console.")) {
+          saveUsageCount(0);
+          renderUsageWidget();
+        }
+      });
+      // ─────────────────────────────────────────────────────────────────────────
+
+      // ── In-page confirmation modal ────────────────────────────────────────────
+      // Returns a Promise<boolean> — true = Proceed, false = Cancel.
+      // Uses a custom modal instead of window.confirm() so it is never blocked
+      // by popup blockers and works identically on mobile and desktop.
+      function showCostModal(title, bodyHTML) {
+        return new Promise((resolve) => {
+          $("costModalTitle").textContent = title;
+          $("costModalBody").innerHTML = bodyHTML;
+          $("costModal").classList.remove("hidden");
+          $("costModalProceed").focus();
+
+          function finish(result) {
+            $("costModal").classList.add("hidden");
+            $("costModalProceed").removeEventListener("click", onProceed);
+            $("costModalCancel").removeEventListener("click", onCancel);
+            $("costModal").removeEventListener("click", onOverlay);
+            document.removeEventListener("keydown", onKey);
+            resolve(result);
+          }
+
+          const onProceed = () => finish(true);
+          const onCancel  = () => finish(false);
+          // Clicking the dim backdrop also cancels.
+          const onOverlay = (e) => { if (e.target === $("costModal")) finish(false); };
+          // Keyboard: Escape = cancel.
+          const onKey = (e) => { if (e.key === "Escape") finish(false); };
+
+          $("costModalProceed").addEventListener("click", onProceed);
+          $("costModalCancel").addEventListener("click", onCancel);
+          $("costModal").addEventListener("click", onOverlay);
+          document.addEventListener("keydown", onKey);
+        });
+      }
+      // ─────────────────────────────────────────────────────────────────────────
+
       const fileInput = $("file");
       const drop = $("drop");
       let csvText = "";
@@ -527,12 +714,35 @@
 
           const duplicatesSkipped = nonEmptyRows - uniqueQueries.length;
 
-          // ── 4. Cost confirm if > 1000 unique lookups ────────────────────────
-          if (uniqueQueries.length > COST_CONFIRM_THRESHOLD) {
-            if (!confirm(
-              `This will look up ${uniqueQueries.length} places ` +
-              `(~${uniqueQueries.length} API calls). Continue?`
-            )) {
+          // ── 4. Cost / size confirmation (in-page modal, never blocked) ────────
+          const currentUsage   = loadUsageCount();
+          const projectedTotal = currentUsage + uniqueQueries.length;
+          const willIncurCost  = projectedTotal > 5000;
+          const isLargeBatch   = uniqueQueries.length > COST_CONFIRM_THRESHOLD;
+
+          if (willIncurCost || isLargeBatch) {
+            let title, body;
+            if (willIncurCost) {
+              const projCost  = calcMonthlyCost(projectedTotal);
+              const prevCost  = calcMonthlyCost(currentUsage);
+              const addedCost = projCost - prevCost;
+              title = "This batch will incur charges";
+              body  =
+                `<p>Your monthly total will reach <strong>${projectedTotal.toLocaleString()}</strong> queries ` +
+                `after this batch of <strong>${uniqueQueries.length.toLocaleString()}</strong>.</p>` +
+                `<p>Queries past 5,000 / month are billed at Place Details Pro rates:<br>` +
+                `<strong>+$${addedCost.toFixed(2)}</strong> for this batch &nbsp;·&nbsp; ` +
+                `<strong>$${projCost.toFixed(2)}</strong> projected monthly total.</p>` +
+                `<p style="color:var(--muted);font-size:12.5px">` +
+                `The Google Cloud console is the authoritative source for billing.</p>`;
+            } else {
+              title = "Large batch — confirm";
+              body  =
+                `<p>This will look up <strong>${uniqueQueries.length.toLocaleString()} places</strong> ` +
+                `(~${uniqueQueries.length.toLocaleString()} API calls). Continue?</p>`;
+            }
+            const ok = await showCostModal(title, body);
+            if (!ok) {
               setStatus("");
               setBusy(false);
               return;
@@ -603,6 +813,7 @@
 
               data.results.forEach((r) => resultsByQuery.set(r.query, r));
               totalApiCalls += data.api_calls || 0;
+              addUsageQueries(data.api_calls || 0);
               totalErrorCount += data.error_count || 0;
               if (data.error_reasons) {
                 Object.entries(data.error_reasons).forEach(([k, v]) => {

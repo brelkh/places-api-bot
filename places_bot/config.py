@@ -1,26 +1,28 @@
 """Configuration and constants for the Places API bot.
 
-All cost-sensitive settings live here. The field mask is deliberately
-restricted to the Places API (New) **Pro** SKU tier so that calls stay in
-the cheapest billable tier that still returns business status.
+All cost-sensitive settings live here. The lookup uses a two-step pattern to
+minimise cost:
+  1. Text Search (IDs-only) — free tier, returns only places.id.
+  2. Place Details (Pro)    — billable, returns the requested fields.
+
+This halves the cost vs a single Text Search Pro call, because the IDs-only
+Text Search tier is free and Place Details Pro is cheaper than Text Search Pro.
 """
 
 from __future__ import annotations
 
 import os
 
-from . import fields as fields_mod
-
-# Endpoint for Places API (New) Text Search.
+# Endpoint for Places API (New) Text Search (always called with IDs-only mask).
 SEARCH_TEXT_URL = "https://places.googleapis.com/v1/places:searchText"
 
-# Default field mask: the default selection from the Pro-tier catalog.
-#
-# IMPORTANT (cost control): the catalog in places_bot/fields.py contains only
-# "IDs Only" and "Pro" tier fields — never opening-hours / phone / rating /
-# website, which sit in the pricier **Enterprise** tier. Callers choose fields
-# by id from that catalog, so a request can never escalate the pricing tier.
-FIELD_MASK = fields_mod.build_field_mask(fields_mod.resolve_fields())
+# Base URL for Places API (New) Place Details: append /{place_id}.
+PLACE_DETAILS_URL = "https://places.googleapis.com/v1/places"
+
+# Text Search is always IDs-only (free tier) — the actual fields come from a
+# subsequent Place Details call.  This constant exists for PlacesClient's
+# default and for the probe_key helper.
+FIELD_MASK = "places.id"
 
 # Defaults for the search request body.
 DEFAULT_REGION_CODE = "SG"

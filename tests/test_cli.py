@@ -5,15 +5,13 @@ from places_bot.client import PlacesClient
 
 
 FAKE_RESULTS = {
-    "McDonald's ARC singapore": [
-        {
-            "businessStatus": "OPERATIONAL",
-            "displayName": {"text": "McDonald's"},
-            "formattedAddress": "1 Alexandra Rd",
-            "googleMapsUri": "https://maps.google.com/x",
-        }
-    ],
-    "Gone Forever singapore": [{"businessStatus": "CLOSED_PERMANENTLY"}],
+    "McDonald's ARC singapore": {
+        "businessStatus": "OPERATIONAL",
+        "displayName": {"text": "McDonald's"},
+        "formattedAddress": "1 Alexandra Rd",
+        "googleMapsUri": "https://maps.google.com/x",
+    },
+    "Gone Forever singapore": {"businessStatus": "CLOSED_PERMANENTLY"},
 }
 
 
@@ -35,9 +33,13 @@ def test_main_end_to_end(tmp_path, monkeypatch):
 
     def fake_search(self, text_query):
         calls["n"] += 1
-        return FAKE_RESULTS.get(text_query, [])
+        return [{"id": text_query}] if text_query in FAKE_RESULTS else []
+
+    def fake_details(self, place_id, detail_mask):
+        return FAKE_RESULTS[place_id]
 
     monkeypatch.setattr(PlacesClient, "search_text", fake_search)
+    monkeypatch.setattr(PlacesClient, "get_place_details", fake_details)
 
     rc = cli.main(
         [
