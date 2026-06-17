@@ -76,24 +76,32 @@ Search endpoint, takes the best match, and records its `businessStatus`.
 
 ### Cost control
 
-Every selectable field lives in [`places_bot/fields.py`](places_bot/fields.py)
-and is in the **Pro** (or cheaper IDs-only) pricing tier — the cheapest tier
-that still returns business status. Callers pick fields **by id**, and unknown
-ids are ignored, so a request can **never** escalate into the pricier
-**Enterprise** tier no matter what is selected. The field mask is built from
-whatever you tick (web) or pass to `--fields` (CLI); the default is
-`businessStatus`, `displayName`, `formattedAddress`, `googleMapsUri`.
+Every lookup uses a **two-step pattern** that minimises cost:
+
+1. **Text Search (New) — IDs-only** (`places.id` only): free tier, returns
+   just the matched place ID.
+2. **Place Details (New) — Pro**: fetches the fields you actually requested
+   (business status, name, address, …) for that place ID.
+
+This is cheaper than a single Text Search Pro call because the IDs-only Text
+Search tier is free and Place Details Pro is priced lower than Text Search Pro.
+
+All selectable fields live in [`places_bot/fields.py`](places_bot/fields.py)
+and are in the **Pro** tier — never the pricier **Enterprise** tier (opening
+hours, phone number, rating, website, …). Callers pick fields **by id**, and
+unknown ids are ignored, so a request can **never** escalate to a higher-priced
+tier.
 
 > **Note on the original example query:** it requested
-> `places.currentOpeningHours.openNow`, which is an **Enterprise-tier** field and
-> would have charged every call at the higher rate. It's intentionally excluded
-> from the catalog. `businessStatus` already returns `OPERATIONAL`,
-> `CLOSED_TEMPORARILY`, and `CLOSED_PERMANENTLY`, which is exactly what we need.
+> `places.currentOpeningHours.openNow`, which is an **Enterprise-tier** field.
+> It's intentionally excluded from the catalog. `businessStatus` already returns
+> `OPERATIONAL`, `CLOSED_TEMPORARILY`, and `CLOSED_PERMANENTLY`.
 
-It also keeps a **local monthly call counter** (`.places_usage.json`) and warns
-before a run would push the current month past a threshold (default `10000`,
-matching the usual free allowance). The Google Cloud console remains the
-authoritative source — this is just a guardrail.
+The CLI keeps a **local monthly call counter** (`.places_usage.json`) and warns
+before a run would push the current month past a threshold (default `10000`).
+The web app shows a **live monthly usage widget** (stored in `localStorage`)
+with a tiered cost calculator that updates after each chunk. The Google Cloud
+console remains the authoritative source — these are guardrails.
 
 ## Setup
 

@@ -6,18 +6,32 @@ DEFAULT = fields_mod.resolve_fields()
 
 
 class FakeClient(PlacesClient):
+    """Two-step fake: search_text returns a place ID; get_place_details returns fields.
+
+    `results` maps query string → place-details dict.  An absent key means not
+    found (search returns []).  `fail_for` can contain query strings (to fail at
+    the search step) or place IDs (to fail at the details step).
+    """
+
     def __init__(self, results, fail_for=None, fail_reason="unknown"):
         super().__init__(api_key="x")
         self.results = results
         self.fail_for = fail_for or set()
         self.fail_reason = fail_reason
-        self.calls = []
+        self.calls = []  # tracks search_text calls (= unique queries)
 
     def search_text(self, query):
         self.calls.append(query)
         if query in self.fail_for:
             raise PlacesAPIError("boom", reason=self.fail_reason)
-        return self.results.get(query, [])
+        if query not in self.results:
+            return []
+        return [{"id": query}]  # use query string as the fake place ID
+
+    def get_place_details(self, place_id, detail_field_mask):
+        if place_id in self.fail_for:
+            raise PlacesAPIError("boom", reason=self.fail_reason)
+        return self.results[place_id]
 
 
 def _rows(*queries):
@@ -31,7 +45,7 @@ def _run(client, rows, **kw):
 
 
 def test_dedupe_shares_one_call():
-    client = FakeClient({"A singapore": [{"businessStatus": "OPERATIONAL"}]})
+    client = FakeClient({"A singapore": {"businessStatus": "OPERATIONAL"}})
     rows = _rows("A", "A", "A")
     summary = _run(client, rows, dedupe=True)
     assert summary.api_calls == 1
@@ -40,7 +54,7 @@ def test_dedupe_shares_one_call():
 
 
 def test_no_dedupe_calls_each_row():
-    client = FakeClient({"A singapore": [{"businessStatus": "OPERATIONAL"}]})
+    client = FakeClient({"A singapore": {"businessStatus": "OPERATIONAL"}})
     rows = _rows("A", "A")
     summary = _run(client, rows, dedupe=False)
     assert summary.api_calls == 2
@@ -64,7 +78,7 @@ def test_api_error_becomes_error_row_with_reason():
 
 
 def test_concurrent_matches_sequential_order():
-    results = {f"R{i} singapore": [{"businessStatus": "OPERATIONAL"}] for i in range(20)}
+    results = {f"R{i} singapore": {"businessStatus": "OPERATIONAL"} for i in range(20)}
     client = FakeClient(results)
     rows = _rows(*[f"R{i}" for i in range(20)])
     summary = _run(client, rows, max_workers=8)

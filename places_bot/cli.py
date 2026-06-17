@@ -143,7 +143,6 @@ def main(argv: list[str] | None = None) -> int:
 
     client = PlacesClient(
         api_key=api_key,
-        field_mask=fields_mod.build_field_mask(fields),
         region_code=args.region_code,
         language_code=args.language_code,
     )

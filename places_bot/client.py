@@ -1,4 +1,4 @@
-"""Thin client for the Google Places API (New) Text Search endpoint."""
+"""Thin client for the Google Places API (New) — Text Search and Place Details."""
 
 from __future__ import annotations
 
@@ -129,6 +129,59 @@ class PlacesClient:
                 continue
 
             # Other 4xx errors are not retryable (bad key, bad request, etc.).
+            raise PlacesAPIError(
+                f"HTTP {resp.status_code}: {resp.text[:500]}",
+                reason=classify_error(resp.status_code, resp.text),
+                http_status=resp.status_code,
+            )
+
+        reason = (
+            classify_error(last_status, "") if last_status is not None else "network"
+        )
+        raise PlacesAPIError(
+            f"Giving up after {self.max_retries} attempt(s). Last error: {last_error}",
+            reason=reason,
+            http_status=last_status,
+        )
+
+    def get_place_details(self, place_id: str, detail_field_mask: str) -> dict[str, Any]:
+        """Fetch Place Details for a known place ID and return the place object.
+
+        Uses the Place Details endpoint (GET /v1/places/{id}) which is in the
+        Pro pricing tier — cheaper per call than Text Search Pro.
+        Retries on 429 and 5xx with the same exponential backoff as search_text.
+        """
+        url = f"{config.PLACE_DETAILS_URL}/{place_id}"
+        headers = {
+            "X-Goog-Api-Key": self.api_key,
+            "X-Goog-FieldMask": detail_field_mask,
+        }
+
+        last_error: str | None = None
+        last_status: int | None = None
+        for attempt in range(self.max_retries):
+            is_last = attempt == self.max_retries - 1
+            try:
+                resp = self._session.get(url, headers=headers, timeout=self.timeout)
+            except requests.RequestException as exc:
+                last_error, last_status = f"network error: {exc}", None
+                if is_last:
+                    break
+                self._sleep_backoff(attempt)
+                continue
+
+            if resp.status_code == 200:
+                return resp.json()
+
+            last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
+            last_status = resp.status_code
+
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if is_last:
+                    break
+                self._sleep_backoff(attempt)
+                continue
+
             raise PlacesAPIError(
                 f"HTTP {resp.status_code}: {resp.text[:500]}",
                 reason=classify_error(resp.status_code, resp.text),

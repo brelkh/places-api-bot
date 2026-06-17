@@ -18,8 +18,8 @@ shared engine:
 ```
 CLI (places_bot/cli.py) ─┐
                          ├─► places_bot/service.py  ──►  places_bot/client.py ──► Google Places API
-Web (api/process.py)  ───┘     lookup_statuses()           PlacesClient.search_text()
-                                     │
+Web (api/process.py)  ───┘     lookup_statuses()           search_text()   (IDs-only, free)
+                                     │                     get_place_details() (Pro, billable)
                                      └─► places_bot/processor.py  (CSV in/out, status labels)
 ```
 
@@ -28,17 +28,19 @@ the lookup. Both the CLI and the web function call it. **Do not duplicate lookup
 logic** — extend the service instead.
 
 Data flow: parse CSV rows → `lookup_statuses` builds the de-duplicated set of
-queries (each = `"<name>" + suffix`, suffix defaults to `" singapore"`) → calls
-`client.search_text` (concurrently in the web path) → `processor.summarize_places`
-maps the API result to output columns → rows are written back to CSV.
+queries (each = `"<name>" + suffix`, suffix defaults to `" singapore"`) →
+**step 1** `client.search_text` with IDs-only mask (free tier) →
+**step 2** `client.get_place_details` with the Pro field mask (concurrently in
+the web path) → `processor.summarize_places` maps the place object to output
+columns → rows are written back to CSV.
 
 ## File map
 
 | Path | What lives here |
 | --- | --- |
-| `places_bot/fields.py` | **Field catalog** — Pro-tier `FieldSpec`s, `resolve_fields`, `build_field_mask`, `field_columns`, status labels. The whitelist that caps the pricing tier. |
-| `places_bot/config.py` | Constants + `get_api_key()`. `FIELD_MASK` (default selection), endpoint URL, defaults, threshold. |
-| `places_bot/client.py` | `PlacesClient` — Text Search call, retry/backoff, **thread-local sessions**. `PlacesAPIError.reason` + `classify_error` (quota/auth/invalid_request/network). |
+| `places_bot/fields.py` | **Field catalog** — Pro-tier `FieldSpec`s, `resolve_fields`, `build_field_mask`, `build_details_field_mask`, `field_columns`, status labels. The whitelist that caps the pricing tier. |
+| `places_bot/config.py` | Constants + `get_api_key()`. `FIELD_MASK` = `"places.id"` (IDs-only for Text Search), `PLACE_DETAILS_URL`, endpoint URL, defaults, threshold. |
+| `places_bot/client.py` | `PlacesClient` — `search_text` (IDs-only), `get_place_details` (Pro fields), retry/backoff, **thread-local sessions**. `PlacesAPIError.reason` + `classify_error`. |
 | `places_bot/service.py` | `lookup_statuses()` (dedupe + concurrency, returns `LookupSummary` with error reasons) and `probe_key()`. The shared engine. |
 | `places_bot/processor.py` | CSV read/write (file + in-memory). `summarize_places`/`error_summary`/`output_fieldnames`/`rows_to_csv` all take `fields`. `detect_query_column`. |
 | `places_bot/cli.py` | argparse CLI (`--fields`), cost-threshold prompt, progress, usage tracking, error summary. |
@@ -55,21 +57,29 @@ maps the API result to output columns → rows are written back to CSV.
    `places_bot/fields.py::FIELD_CATALOG` (IDs-only/Pro only). Callers pick fields
    **by id**, and `resolve_fields` ignores unknown ids — so a request can never
    escalate into the pricier **Enterprise** tier (opening hours, phone, rating,
-   website). To add a field: add a `FieldSpec` with its mask + extractor, after
-   verifying it is Pro/IDs-only. Never add an Enterprise field here.
-2. **One engine.** CLI and web both go through `service.lookup_statuses`, which is
+   website). To add a field: add a `FieldSpec` with its `mask` (e.g.
+   `places.businessStatus`) + extractor, after verifying it is Pro. The mask is
+   used for Text Search display (with `places.` prefix) and Place Details (prefix
+   stripped by `build_details_field_mask`). Never add an Enterprise field here.
+2. **Two-step lookup pattern.** Each query makes two API calls: (a) Text Search
+   IDs-only (free) to get the place ID, then (b) Place Details Pro to fetch the
+   requested fields. **Never** revert to a single Text Search Pro call — it costs
+   more for the same data. Both steps run inside the same `call()` closure in
+   `service.lookup_statuses`.
+3. **One engine.** CLI and web both go through `service.lookup_statuses`, which is
    field-driven (`summarize_places`/`error_summary`/CSV helpers all take the
    resolved `fields`). Keep it that way.
-3. **Concurrency safety.** The web path runs `search_text` across threads. The
-   client keeps a `requests.Session` per thread (`threading.local`). Don't add
+4. **Concurrency safety.** The web path runs the two-step lookup across threads.
+   The client keeps a `requests.Session` per thread (`threading.local`). Don't add
    shared mutable state across threads (the rate limiter uses a lock).
-4. **Secrets via env, never committed.** `GOOGLE_MAPS_API_KEY` (CLI + web) and
+5. **Secrets via env, never committed.** `GOOGLE_MAPS_API_KEY` (CLI + web) and
    `APP_PASSWORD` (web; also signs the verify token). Local: `.env` / shell.
    Vercel: dashboard env vars. CI: GitHub Secrets. `.env` and
    `restaurant_status.csv` are git-ignored.
-5. **Dedupe = cost control.** Identical queries are looked up once. `LookupSummary.
-   api_calls` ≤ rows (+1 if a user key is probed).
-6. **Auth before upload.** The browser calls `POST /api/verify` first and only
+6. **Dedupe = cost control.** Identical queries are looked up once. `LookupSummary.
+   api_calls` ≤ rows (+1 if a user key is probed). Each counted call = one Place
+   Details Pro call (the IDs-only Text Search is free and not counted separately).
+7. **Auth before upload.** The browser calls `POST /api/verify` first and only
    uploads the CSV on success; the server still re-checks (token or password) on
    `POST /api/process`. Keep this order — don't let `/api/process` parse a body
    before authorizing.

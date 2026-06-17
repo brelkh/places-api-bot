@@ -158,8 +158,16 @@ def resolve_fields(ids: list[str] | None = None) -> list[FieldSpec]:
 
 
 def build_field_mask(fields: list[FieldSpec]) -> str:
-    """Comma-joined `X-Goog-FieldMask` value for the chosen fields."""
+    """Comma-joined `X-Goog-FieldMask` for Text Search (includes 'places.' prefix)."""
     return ",".join(f.mask for f in fields)
+
+
+def build_details_field_mask(fields: list[FieldSpec]) -> str:
+    """Comma-joined `X-Goog-FieldMask` for Place Details calls.
+
+    Place Details paths drop the leading 'places.' that Text Search paths carry.
+    """
+    return ",".join(f.mask.removeprefix("places.") for f in fields)
 
 
 def field_columns(fields: list[FieldSpec]) -> list[str]:
