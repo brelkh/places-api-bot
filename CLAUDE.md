@@ -38,7 +38,7 @@ columns → rows are written back to CSV.
 
 | Path | What lives here |
 | --- | --- |
-| `places_bot/fields.py` | **Field catalog** — Pro-tier `FieldSpec`s, `resolve_fields`, `build_field_mask`, `build_details_field_mask`, `field_columns`, status labels. The whitelist that caps the pricing tier. |
+| `places_bot/fields.py` | **Field catalog** — Pro-tier `FieldSpec`s, `resolve_fields`, `build_details_field_mask`, `field_columns`, status labels. The whitelist that caps the pricing tier. |
 | `places_bot/config.py` | Constants + `get_api_key()`. `FIELD_MASK` = `"places.id"` (IDs-only for Text Search), `PLACE_DETAILS_URL`, endpoint URL, defaults, threshold. |
 | `places_bot/client.py` | `PlacesClient` — `search_text` (IDs-only), `get_place_details` (Pro fields), retry/backoff, **thread-local sessions**. `PlacesAPIError.reason` + `classify_error`. |
 | `places_bot/service.py` | `lookup_statuses()` (dedupe + concurrency, optional `cache=`, returns `LookupSummary` with error reasons + `cache_hits`) and `probe_key()`. The shared engine. Internals: `raw_lookup` (place dict / None / `PlacesAPIError`) + `summarize`; `_lookup_cached` is the cache-backed variant. |
@@ -60,9 +60,9 @@ columns → rows are written back to CSV.
    **by id**, and `resolve_fields` ignores unknown ids — so a request can never
    escalate into the pricier **Enterprise** tier (opening hours, phone, rating,
    website). To add a field: add a `FieldSpec` with its `mask` (e.g.
-   `places.businessStatus`) + extractor, after verifying it is Pro. The mask is
-   used for Text Search display (with `places.` prefix) and Place Details (prefix
-   stripped by `build_details_field_mask`). Never add an Enterprise field here.
+   `places.businessStatus`) + extractor, after verifying it is Pro. The `places.`
+   prefix on the mask is stripped for the Place Details call by
+   `build_details_field_mask`. Never add an Enterprise field here.
 2. **Two-step lookup pattern.** Each query makes two API calls: (a) Text Search
    IDs-only (free) to get the place ID, then (b) Place Details Pro to fetch the
    fields. **Never** revert to a single Text Search Pro call — it costs more for
