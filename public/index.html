@@ -120,6 +120,7 @@
       .banner.warn { background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn-ink); }
       .banner.err { background: var(--err-bg); border: 1px solid var(--err-line); color: var(--err-ink); }
       .pills { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 16px; }
+      .key-caption { font-size: 13px; color: var(--muted); margin: -10px 0 16px; display: inline-flex; align-items: center; }
       .pill { font-size: 13px; font-weight: 600; padding: 5px 11px; border-radius: 999px; background: var(--other-bg); color: var(--other); }
       .info { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; margin-left:6px; border-radius:50%; border:1px solid currentColor; font-size:9px; font-weight:700; font-style:normal; line-height:1; cursor:help; opacity:.6; position:relative; vertical-align:middle; }
       .info:hover, .info:focus { opacity:1; outline:none; }
@@ -269,6 +270,7 @@
           <button id="download" type="button">Download CSV</button>
         </div>
         <div class="pills" id="pills"></div>
+        <div class="key-caption hidden" id="keyCaption"></div>
         <div class="table-scroll">
           <table id="table"><thead></thead><tbody></tbody></table>
         </div>
@@ -1032,28 +1034,31 @@
         return "other";
       }
 
-      // A summary pill, optionally with a hover/focus "i" explainer.
+      // A hover/focus/tap "i" explainer icon.
+      function makeInfo(tip) {
+        const i = document.createElement("span");
+        i.className = "info";
+        i.textContent = "i";
+        i.tabIndex = 0;
+        i.setAttribute("role", "note");
+        i.setAttribute("data-tip", tip);
+        i.setAttribute("aria-label", tip);
+        // Hover covers desktop; tap-to-toggle covers touch (no :hover there).
+        i.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          const open = i.classList.contains("show");
+          document.querySelectorAll(".info.show").forEach((el) => el.classList.remove("show"));
+          if (!open) i.classList.add("show");
+        });
+        return i;
+      }
+
+      // A summary pill, optionally with an "i" explainer.
       function makePill(text, tip) {
         const s = document.createElement("span");
         s.className = "pill";
         s.textContent = text;
-        if (tip) {
-          const i = document.createElement("span");
-          i.className = "info";
-          i.textContent = "i";
-          i.tabIndex = 0;
-          i.setAttribute("role", "note");
-          i.setAttribute("data-tip", tip);
-          i.setAttribute("aria-label", tip);
-          // Hover covers desktop; tap-to-toggle covers touch (no :hover there).
-          i.addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            const open = i.classList.contains("show");
-            document.querySelectorAll(".info.show").forEach((el) => el.classList.remove("show"));
-            if (!open) i.classList.add("show");
-          });
-          s.appendChild(i);
-        }
+        if (tip) s.appendChild(makeInfo(tip));
         return s;
       }
       // Tap anywhere else dismisses an open tooltip (touch devices).
@@ -1109,9 +1114,6 @@
           "month's usage count."
         ));
 
-        const kl = keyLabel(data.key_used);
-        if (kl) pills.appendChild(makePill(kl.text, kl.tip));
-
         if (data.duplicates_skipped > 0) {
           pills.appendChild(makePill(
             `${data.duplicates_skipped} duplicate row` +
@@ -1119,6 +1121,17 @@
           ));
         }
         // Per-status counts intentionally omitted — they're in the table/CSV.
+
+        // Which key was used reads as a sentence, so it's a caption below the
+        // pills rather than a cramped badge.
+        const caption = $("keyCaption");
+        caption.innerHTML = "";
+        const kl = keyLabel(data.key_used);
+        if (kl) {
+          caption.appendChild(document.createTextNode(kl.text));
+          if (kl.tip) caption.appendChild(makeInfo(kl.tip));
+        }
+        caption.classList.toggle("hidden", !kl);
 
         const cols = data.columns;
         const thead = $("table").querySelector("thead");
