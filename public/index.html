@@ -124,7 +124,7 @@
       .info { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; margin-left:6px; border-radius:50%; border:1px solid currentColor; font-size:9px; font-weight:700; font-style:normal; line-height:1; cursor:help; opacity:.6; position:relative; vertical-align:middle; }
       .info:hover, .info:focus { opacity:1; outline:none; }
       .info::after { content:attr(data-tip); position:absolute; bottom:160%; left:50%; transform:translateX(-50%); background:var(--ink); color:#fff; padding:8px 10px; border-radius:8px; font-size:12px; font-weight:500; font-style:normal; line-height:1.4; text-align:left; white-space:normal; width:max-content; max-width:230px; opacity:0; visibility:hidden; pointer-events:none; transition:opacity .12s; z-index:20; box-shadow:0 4px 14px rgba(0,0,0,.18); }
-      .info:hover::after, .info:focus::after { opacity:1; visibility:visible; }
+      .info:hover::after, .info:focus::after, .info.show::after { opacity:1; visibility:visible; }
       .summary-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
       .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
       table { border-collapse: collapse; width: 100%; font-size: 14px; }
@@ -862,11 +862,10 @@
             if (!probeResp.ok) throw new Error(probeData.error || "Key probe failed.");
             keyUsed = probeData.key_used;
             keyWarning = probeData.key_warning;
-            // Only forward the key in chunks if the probe accepted it. Exact
-            // match: a failure reads "the app's key (your key failed)", which
-            // also contains "your key" — substring matching would misfire and
-            // forward the rejected key.
-            sendApiKey = keyUsed === "your key";
+            // Forward the user key to the chunk loop only if the probe actually
+            // chose it. Uses the server's structured flag (not the display
+            // string, which is overloaded — a failure also contains "your key").
+            sendApiKey = !!probeData.used_user_key;
           }
 
           // ── 6. Chunk loop (sequential, 75 queries at a time) ───────────────
@@ -964,13 +963,7 @@
             return out;
           });
 
-          // ── 8. Build summary counts and error banner ───────────────────────
-          const summary = {};
-          outputRows.forEach((r) => {
-            const label = r.business_status_label || "";
-            summary[label] = (summary[label] || 0) + 1;
-          });
-
+          // ── 8. Build the error banner ──────────────────────────────────────
           let errorBannerText = null;
           if (totalErrorCount > 0) {
             const topEntry = Object.entries(allErrorReasons)
@@ -1009,7 +1002,6 @@
             duplicates_skipped: duplicatesSkipped,
             csv: csvStringify(outputHeaders, outputRows),
             filename: "restaurant_status.csv",
-            summary,
           });
           setStatus("");
 
@@ -1053,21 +1045,32 @@
           i.setAttribute("role", "note");
           i.setAttribute("data-tip", tip);
           i.setAttribute("aria-label", tip);
+          // Hover covers desktop; tap-to-toggle covers touch (no :hover there).
+          i.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            const open = i.classList.contains("show");
+            document.querySelectorAll(".info.show").forEach((el) => el.classList.remove("show"));
+            if (!open) i.classList.add("show");
+          });
           s.appendChild(i);
         }
         return s;
       }
+      // Tap anywhere else dismisses an open tooltip (touch devices).
+      document.addEventListener("click", () => {
+        document.querySelectorAll(".info.show").forEach((el) => el.classList.remove("show"));
+      });
 
       // Plain-language label for which API key did the lookups. (The raw server
       // strings drive control flow, so we only translate them for display.)
       function keyLabel(k) {
         if (!k) return null;
         if (k.includes("your key failed"))
-          return { text: "App key (yours failed)", tip: "Your key didn't work, so the app's built-in key was used instead — see the note above." };
+          return { text: "The app key was used (Your key failed)", tip: "Your key didn't work, so the app's built-in key was used instead — see the note above." };
         if (k.includes("your key"))
-          return { text: "Your API key", tip: "Lookups used the personal Google API key you entered." };
+          return { text: "Your key was used", tip: "Lookups used the personal Google API key you entered." };
         if (k.includes("app's key"))
-          return { text: "App key", tip: "Lookups used the app's built-in Google API key (the shared default). To use your own, paste it in the “Use your own Google API key” field." };
+          return { text: "The app key was used", tip: "The app's built-in Google API key (the shared default). To use your own, paste it in the “Use your own Google API key” field." };
         return { text: k, tip: null };
       }
 
@@ -1115,13 +1118,7 @@
             `${data.duplicates_skipped !== 1 ? "s" : ""} skipped`
           ));
         }
-
-        // Surface only the actionable statuses (closed / unknown / errors) —
-        // a big "Open" count is just noise for a closure-checking tool.
-        Object.entries(data.summary)
-          .filter(([label]) => label.toLowerCase() !== "open")
-          .sort((a, b) => b[1] - a[1])
-          .forEach(([label, n]) => pills.appendChild(makePill(`${label}: ${n}`)));
+        // Per-status counts intentionally omitted — they're in the table/CSV.
 
         const cols = data.columns;
         const thead = $("table").querySelector("thead");

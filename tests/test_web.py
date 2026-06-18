@@ -255,7 +255,40 @@ def test_json_probe_only_returns_key_info(client):
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["key_used"] == "the app's key"
+    assert body["used_user_key"] is False  # server key, don't forward
     assert "results" not in body  # no lookup performed
+
+
+def test_probe_used_user_key_flag_true_when_key_accepted(client, monkeypatch):
+    monkeypatch.setattr(web.service, "probe_key", lambda key, **kw: None)  # accepts
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"probe_only": True, "api_key": "good-user-key"},
+        headers={"X-App-Token": token},
+    )
+    body = resp.get_json()
+    assert body["key_used"] == "your key"
+    assert body["used_user_key"] is True
+
+
+def test_probe_used_user_key_flag_false_when_key_failed(client, monkeypatch):
+    # Regression guard: the failure string "the app's key (your key failed)"
+    # contains "your key"; the structured flag must still be False so the
+    # browser does NOT forward the rejected key to the chunk loop.
+    monkeypatch.setattr(
+        web.service, "probe_key",
+        lambda key, **kw: PlacesAPIError("bad", reason="auth"),
+    )
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"probe_only": True, "api_key": "bad-user-key"},
+        headers={"X-App-Token": token},
+    )
+    body = resp.get_json()
+    assert "your key failed" in body["key_used"]
+    assert body["used_user_key"] is False
 
 
 def test_json_requires_auth(client):

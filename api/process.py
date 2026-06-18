@@ -238,7 +238,18 @@ def _handle_process_json():
         chosen_key, key_used, key_warning, _, err = _choose_key_json(data)
         if err is not None:
             return err
-        return jsonify({"key_used": key_used, "key_warning": key_warning})
+        # Structured signal for the browser's "forward the user key?" decision —
+        # robust vs. parsing the human-readable key_used string. True only when
+        # the key that will actually be used IS the user's provided key.
+        user_key = (data.get("api_key") or "").strip()
+        used_user_key = bool(user_key) and chosen_key == user_key
+        return jsonify(
+            {
+                "key_used": key_used,
+                "key_warning": key_warning,
+                "used_user_key": used_user_key,
+            }
+        )
 
     # Read-only cache pre-check used to refine the cost-confirmation modal: how
     # many of these queries are already cached (and so cost no API call). No
