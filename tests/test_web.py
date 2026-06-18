@@ -283,3 +283,70 @@ def test_json_row_counting_rate_limiter(client, monkeypatch):
     )
     assert resp.status_code == 429
     assert resp.get_json()["retry_after"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# Shared usage counter (GET /api/usage + increment on /api/process)
+# --------------------------------------------------------------------------- #
+def test_usage_endpoint_is_public_and_reports_not_configured(client, monkeypatch):
+    """No Upstash env vars → public endpoint reports not_configured, no auth."""
+    monkeypatch.delenv("UPSTASH_REDIS_REST_URL", raising=False)
+    monkeypatch.delenv("UPSTASH_REDIS_REST_TOKEN", raising=False)
+    monkeypatch.delenv("KV_REST_API_URL", raising=False)
+    monkeypatch.delenv("KV_REST_API_TOKEN", raising=False)
+    resp = client.get("/api/usage")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["storage"] == "not_configured"
+    assert body["monthly_api_calls"] is None
+    assert "month" in body
+
+
+def test_usage_endpoint_returns_shared_counts(client, monkeypatch):
+    monkeypatch.setattr(
+        web.usage_store,
+        "get_api_usage",
+        lambda: {
+            "month": "2026-06",
+            "monthly_api_calls": 123,
+            "total_api_calls": 456,
+            "storage": "upstash_redis",
+        },
+    )
+    resp = client.get("/api/usage")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {
+        "month": "2026-06",
+        "monthly_api_calls": 123,
+        "total_api_calls": 456,
+        "storage": "upstash_redis",
+    }
+
+
+def test_json_process_increments_shared_counter(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(web.usage_store, "increment_api_calls", lambda n: calls.append(n))
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"queries": ["McDonald's ARC", "Gone Forever"]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    # Two unique queries, server key (no probe) → 2 billable Place Details calls.
+    assert calls == [2]
+
+
+def test_multipart_process_increments_shared_counter(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(web.usage_store, "increment_api_calls", lambda n: calls.append(n))
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        data=_csv(),
+        content_type="multipart/form-data",
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    assert calls == [2]
