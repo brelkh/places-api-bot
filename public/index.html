@@ -121,6 +121,10 @@
       .banner.err { background: var(--err-bg); border: 1px solid var(--err-line); color: var(--err-ink); }
       .pills { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 16px; }
       .pill { font-size: 13px; font-weight: 600; padding: 5px 11px; border-radius: 999px; background: var(--other-bg); color: var(--other); }
+      .info { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; margin-left:6px; border-radius:50%; border:1px solid currentColor; font-size:9px; font-weight:700; font-style:normal; line-height:1; cursor:help; opacity:.6; position:relative; vertical-align:middle; }
+      .info:hover, .info:focus { opacity:1; outline:none; }
+      .info::after { content:attr(data-tip); position:absolute; bottom:160%; left:50%; transform:translateX(-50%); background:var(--ink); color:#fff; padding:8px 10px; border-radius:8px; font-size:12px; font-weight:500; font-style:normal; line-height:1.4; text-align:left; white-space:normal; width:max-content; max-width:230px; opacity:0; visibility:hidden; pointer-events:none; transition:opacity .12s; z-index:20; box-shadow:0 4px 14px rgba(0,0,0,.18); }
+      .info:hover::after, .info:focus::after { opacity:1; visibility:visible; }
       .summary-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
       .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
       table { border-collapse: collapse; width: 100%; font-size: 14px; }
@@ -858,8 +862,11 @@
             if (!probeResp.ok) throw new Error(probeData.error || "Key probe failed.");
             keyUsed = probeData.key_used;
             keyWarning = probeData.key_warning;
-            // Only forward the key in chunks if the probe accepted it.
-            sendApiKey = !!(keyUsed && keyUsed.includes("your key"));
+            // Only forward the key in chunks if the probe accepted it. Exact
+            // match: a failure reads "the app's key (your key failed)", which
+            // also contains "your key" — substring matching would misfire and
+            // forward the rejected key.
+            sendApiKey = keyUsed === "your key";
           }
 
           // ── 6. Chunk loop (sequential, 75 queries at a time) ───────────────
@@ -1033,6 +1040,37 @@
         return "other";
       }
 
+      // A summary pill, optionally with a hover/focus "i" explainer.
+      function makePill(text, tip) {
+        const s = document.createElement("span");
+        s.className = "pill";
+        s.textContent = text;
+        if (tip) {
+          const i = document.createElement("span");
+          i.className = "info";
+          i.textContent = "i";
+          i.tabIndex = 0;
+          i.setAttribute("role", "note");
+          i.setAttribute("data-tip", tip);
+          i.setAttribute("aria-label", tip);
+          s.appendChild(i);
+        }
+        return s;
+      }
+
+      // Plain-language label for which API key did the lookups. (The raw server
+      // strings drive control flow, so we only translate them for display.)
+      function keyLabel(k) {
+        if (!k) return null;
+        if (k.includes("your key failed"))
+          return { text: "App key (yours failed)", tip: "Your key didn't work, so the app's built-in key was used instead — see the note above." };
+        if (k.includes("your key"))
+          return { text: "Your API key", tip: "Lookups used the personal Google API key you entered." };
+        if (k.includes("app's key"))
+          return { text: "App key", tip: "Lookups used the app's built-in Google API key (the shared default). To use your own, paste it in the “Use your own Google API key” field." };
+        return { text: k, tip: null };
+      }
+
       function render(data) {
         csvText = data.csv;
         csvName = data.filename || "restaurant_status.csv";
@@ -1046,37 +1084,44 @@
         eb.textContent = data.error_banner || "";
 
         const pills = $("pills");
-        pills.innerHTML =
-          `<span class="pill">${data.row_count} row${data.row_count !== 1 ? "s" : ""}` +
-          ` · ${data.api_calls} API call${data.api_calls !== 1 ? "s" : ""}` +
-          (data.key_used ? ` · ${esc(data.key_used)}` : "") +
-          `</span>`;
+        pills.innerHTML = "";
 
-        if (data.duplicates_skipped > 0) {
-          const s = document.createElement("span");
-          s.className = "pill";
-          s.textContent =
-            `${data.duplicates_skipped} duplicate row` +
-            `${data.duplicates_skipped !== 1 ? "s" : ""} skipped`;
-          pills.appendChild(s);
-        }
+        // Order: rows → from cache → API calls → which key → notable statuses.
+        pills.appendChild(
+          makePill(`${data.row_count} row${data.row_count !== 1 ? "s" : ""}`)
+        );
 
         if (data.cache_hits > 0) {
-          const s = document.createElement("span");
-          s.className = "pill";
-          s.textContent =
-            `${data.cache_hits} served from cache (no API call)`;
-          pills.appendChild(s);
+          pills.appendChild(makePill(
+            `${data.cache_hits} from cache`,
+            "Each restaurant's status is cached for a day, so repeat lookups " +
+            "within 24 hours are served from the cache and cost no API call."
+          ));
         }
 
+        pills.appendChild(makePill(
+          `${data.api_calls} API call${data.api_calls !== 1 ? "s" : ""}`,
+          "API calls = restaurants looked up minus the ones already cached. " +
+          "These are the only billable calls, and they're added to this " +
+          "month's usage count."
+        ));
+
+        const kl = keyLabel(data.key_used);
+        if (kl) pills.appendChild(makePill(kl.text, kl.tip));
+
+        if (data.duplicates_skipped > 0) {
+          pills.appendChild(makePill(
+            `${data.duplicates_skipped} duplicate row` +
+            `${data.duplicates_skipped !== 1 ? "s" : ""} skipped`
+          ));
+        }
+
+        // Surface only the actionable statuses (closed / unknown / errors) —
+        // a big "Open" count is just noise for a closure-checking tool.
         Object.entries(data.summary)
+          .filter(([label]) => label.toLowerCase() !== "open")
           .sort((a, b) => b[1] - a[1])
-          .forEach(([label, n]) => {
-            const s = document.createElement("span");
-            s.className = "pill";
-            s.textContent = `${label}: ${n}`;
-            pills.appendChild(s);
-          });
+          .forEach(([label, n]) => pills.appendChild(makePill(`${label}: ${n}`)));
 
         const cols = data.columns;
         const thead = $("table").querySelector("thead");
