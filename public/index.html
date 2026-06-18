@@ -345,10 +345,9 @@
       const USAGE_STORAGE_KEY = "rsl_monthly_usage";
       // Shared-counter state, seeded from /api/usage on load.
       let serverUsage = { configured: false, count: 0 };
-      // Google's free Place Details Pro allotment per month (5,000).
-      // ⚠️ TEST OVERRIDE: temporarily lowered to exercise the cost warning at a
-      // small call count. REVERT TO 5000 after testing on the live app.
-      const FREE_TIER = 25;
+      // Google's free Place Details Pro allotment per month. Single source of
+      // truth for every free-tier check below (cost table, warnings, widget).
+      const FREE_TIER = 5000;
       // Places API (New) "Place Details Pro" SKU — the billable step of our
       // two-step lookup (the IDs-only Text Search step is free). Prices are per
       // 1,000 requests; `rate` is the per-query cost used by calcMonthlyCost.
@@ -811,17 +810,19 @@
               const projCost  = calcMonthlyCost(projectedTotal);
               const prevCost  = calcMonthlyCost(currentUsage);
               const addedCost = projCost - prevCost;
-              title = "This batch will incur charges";
+              title = "This batch of queries will incur charges";
               body  =
+                `<p style="font-size:16px">` +
+                `<strong>+$${addedCost.toFixed(2)}</strong> for this batch &nbsp;·&nbsp; ` +
+                `<strong>$${projCost.toFixed(2)}</strong> projected monthly total</p>` +
+                `<p>Queries past ${FREE_TIER.toLocaleString()} / month are billed at ` +
+                `Place Details Pro rates.</p>` +
                 `<p>This batch is <strong>${allQueries.toLocaleString()}</strong> ` +
                 `quer${allQueries !== 1 ? "ies" : "y"}` +
-                (cachedNote ? ` — ${cachedNote}.` : `.`) + `</p>` +
-                `<p>Your monthly billable total (app-wide, all keys) will reach ` +
+                (cachedNote ? ` — ${cachedNote}.` : `.`) + `<br>` +
+                `Your updated monthly query counter will reach ` +
                 `<strong>${projectedTotal.toLocaleString()}</strong> queries.</p>` +
-                `<p>Queries past ${FREE_TIER.toLocaleString()} / month are billed at Place Details Pro rates:<br>` +
-                `<strong>+$${addedCost.toFixed(2)}</strong> for this batch &nbsp;·&nbsp; ` +
-                `<strong>$${projCost.toFixed(2)}</strong> projected monthly total.</p>` +
-                `<p style="color:var(--muted);font-size:12.5px">` +
+                `<p style="color:var(--muted);font-size:12px">` +
                 `Cost is based on cache misses. The Google Cloud console is the ` +
                 `authoritative source for billing.</p>`;
             } else {
