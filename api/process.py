@@ -240,6 +240,17 @@ def _handle_process_json():
             return err
         return jsonify({"key_used": key_used, "key_warning": key_warning})
 
+    # Read-only cache pre-check used to refine the cost-confirmation modal: how
+    # many of these queries are already cached (and so cost no API call). No
+    # Google calls, no counter increment, no rate limit — just a Redis MGET.
+    if data.get("cache_check"):
+        names = data.get("queries") or []
+        if not place_cache.is_enabled() or not names:
+            return jsonify({"cache_enabled": place_cache.is_enabled(), "cached_count": 0})
+        full = [service.full_query(n, config.DEFAULT_QUERY_SUFFIX) for n in names]
+        cached = place_cache.get_many(full)
+        return jsonify({"cache_enabled": True, "cached_count": len(cached)})
+
     queries = data.get("queries")
     if not isinstance(queries, list):
         return _error("'queries' must be a list of names.", 400)

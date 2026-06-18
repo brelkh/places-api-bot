@@ -114,9 +114,12 @@ The web app shows a **live monthly usage widget** with a tiered cost calculator
 that updates after each chunk. With an Upstash Redis store configured (see
 [Deploy](#deploy)) it reads a **shared, app-wide counter** — so every user sees
 the same total, matching how Google's free tier (5,000 calls/month) is shared
-across the app's single key. Without the store it falls back to a per-browser
-`localStorage` estimate. The Google Cloud console remains authoritative — these
-are guardrails.
+across the app's single key. The count is **app-wide and counts every call,
+including personal (BYO) keys**, so it tracks total volume through the app
+rather than one person's bill. Without the store it falls back to a per-browser
+`localStorage` estimate. The cost-confirmation modal pre-checks the cache and
+bases its estimate on the **cache misses** (the calls you'll actually pay for).
+The Google Cloud console remains authoritative — these are guardrails.
 
 ## Setup
 

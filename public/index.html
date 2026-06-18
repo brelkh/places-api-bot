@@ -408,7 +408,7 @@
         const d = new Date();
         const monthLabel = d.toLocaleString("default", { month: "long", year: "numeric" });
         $("usageMonth").textContent = serverUsage.configured
-          ? monthLabel + " · shared across all users"
+          ? monthLabel + " · app-wide total, all keys (incl. personal)"
           : monthLabel;
         // The shared counter is global and authoritative, so a per-browser
         // "Reset" would be misleading — only show it in localStorage fallback.
@@ -703,6 +703,26 @@
         $("progressWrap").classList.add("hidden");
       }
 
+      // Ask the server (read-only, no API call / no charge) how many of these
+      // queries are already cached, to refine the cost modal. Returns 0 on any
+      // failure or when caching is off, so the caller falls back to the
+      // upper-bound estimate.
+      async function cacheCheck(names, token, password) {
+        try {
+          const resp = await fetch("/api/process", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-App-Token": token,
+              "X-App-Password": password,
+            },
+            body: JSON.stringify({ cache_check: true, queries: names }),
+          });
+          if (!resp.ok) return 0;
+          return (await resp.json()).cached_count || 0;
+        } catch { return 0; }
+      }
+
       // --------------------------------------------------------------------------
       // Form submit → chunked lookup flow
       // --------------------------------------------------------------------------
@@ -757,12 +777,25 @@
           const duplicatesSkipped = nonEmptyRows - uniqueQueries.length;
 
           // ── 4. Cost / size confirmation (in-page modal, never blocked) ────────
-          const currentUsage   = loadUsageCount();
-          const projectedTotal = currentUsage + uniqueQueries.length;
-          const willIncurCost  = projectedTotal > 5000;
-          const isLargeBatch   = uniqueQueries.length > COST_CONFIRM_THRESHOLD;
+          const allQueries   = uniqueQueries.length;
+          const currentUsage = loadUsageCount();
+          // Only refine with a cache pre-check when an upper-bound estimate would
+          // warn at all — avoids an extra round-trip for small / cheap batches.
+          const mightWarn = (currentUsage + allQueries) > 5000
+            || allQueries > COST_CONFIRM_THRESHOLD;
+          const cachedCount = mightWarn
+            ? await cacheCheck(uniqueQueries, token, password)
+            : 0;
+          const billable       = Math.max(0, allQueries - cachedCount);
+          const projectedTotal = currentUsage + billable;     // billable only
+          const willIncurCost  = projectedTotal > 5000 && billable > 0;
+          const isLargeBatch   = allQueries > COST_CONFIRM_THRESHOLD;
 
           if (willIncurCost || isLargeBatch) {
+            const cachedNote = cachedCount > 0
+              ? `<strong>${cachedCount.toLocaleString()}</strong> already cached (free), ` +
+                `<strong>${billable.toLocaleString()}</strong> new`
+              : null;
             let title, body;
             if (willIncurCost) {
               const projCost  = calcMonthlyCost(projectedTotal);
@@ -770,20 +803,25 @@
               const addedCost = projCost - prevCost;
               title = "This batch will incur charges";
               body  =
-                `<p>Your monthly total will reach <strong>${projectedTotal.toLocaleString()}</strong> queries ` +
-                `after this batch of <strong>${uniqueQueries.length.toLocaleString()}</strong>.</p>` +
+                `<p>This batch is <strong>${allQueries.toLocaleString()}</strong> ` +
+                `quer${allQueries !== 1 ? "ies" : "y"}` +
+                (cachedNote ? ` — ${cachedNote}.` : `.`) + `</p>` +
+                `<p>Your monthly billable total (app-wide, all keys) will reach ` +
+                `<strong>${projectedTotal.toLocaleString()}</strong> queries.</p>` +
                 `<p>Queries past 5,000 / month are billed at Place Details Pro rates:<br>` +
                 `<strong>+$${addedCost.toFixed(2)}</strong> for this batch &nbsp;·&nbsp; ` +
                 `<strong>$${projCost.toFixed(2)}</strong> projected monthly total.</p>` +
                 `<p style="color:var(--muted);font-size:12.5px">` +
-                `This is an upper bound — places looked up in the last 24h are served ` +
-                `from cache for free, so the actual charge may be lower. ` +
-                `The Google Cloud console is the authoritative source for billing.</p>`;
+                `Cost is based on cache misses. The Google Cloud console is the ` +
+                `authoritative source for billing.</p>`;
             } else {
               title = "Large batch — confirm";
               body  =
-                `<p>This will look up <strong>${uniqueQueries.length.toLocaleString()} places</strong> ` +
-                `(~${uniqueQueries.length.toLocaleString()} API calls). Continue?</p>`;
+                `<p>This will look up <strong>${allQueries.toLocaleString()} places</strong>` +
+                (cachedNote
+                  ? ` (${cachedNote} API call${billable !== 1 ? "s" : ""}).`
+                  : ` (~${allQueries.toLocaleString()} API calls).`) +
+                ` Continue?</p>`;
             }
             const ok = await showCostModal(title, body);
             if (!ok) {

@@ -381,3 +381,43 @@ def test_json_process_reports_and_uses_cache(client, monkeypatch):
     assert counted == [1]  # counter charged for the miss only
     # The miss was found and written back to the cache.
     assert stored and "Gone Forever singapore" in stored[0]
+
+
+# --------------------------------------------------------------------------- #
+# cache_check mode (read-only pre-check for the cost modal)
+# --------------------------------------------------------------------------- #
+def test_cache_check_counts_cached_without_charging(client, monkeypatch):
+    monkeypatch.setattr(web.place_cache, "is_enabled", lambda: True)
+    # Pretend the first of the two (suffixed) queries is cached.
+    monkeypatch.setattr(
+        web.place_cache, "get_many",
+        lambda full: {full[0]: {"businessStatus": "OPERATIONAL"}},
+    )
+    counted = []
+    monkeypatch.setattr(web.usage_store, "increment_api_calls", lambda n: counted.append(n))
+
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"cache_check": True, "queries": ["McDonald's ARC", "Gone Forever"]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"cache_enabled": True, "cached_count": 1}
+    assert counted == []  # a cache check never charges the counter
+
+
+def test_cache_check_reports_disabled(client):
+    # No Upstash env in the fixture → caching off.
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"cache_check": True, "queries": ["X"]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.get_json() == {"cache_enabled": False, "cached_count": 0}
+
+
+def test_cache_check_requires_auth(client):
+    resp = client.post("/api/process", json={"cache_check": True, "queries": ["X"]})
+    assert resp.status_code == 401
