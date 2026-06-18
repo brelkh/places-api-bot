@@ -345,13 +345,17 @@
       const USAGE_STORAGE_KEY = "rsl_monthly_usage";
       // Shared-counter state, seeded from /api/usage on load.
       let serverUsage = { configured: false, count: 0 };
+      // Google's free Place Details Pro allotment per month (5,000).
+      // ⚠️ TEST OVERRIDE: temporarily lowered to exercise the cost warning at a
+      // small call count. REVERT TO 5000 after testing on the live app.
+      const FREE_TIER = 25;
       // Places API (New) "Place Details Pro" SKU — the billable step of our
       // two-step lookup (the IDs-only Text Search step is free). Prices are per
       // 1,000 requests; `rate` is the per-query cost used by calcMonthlyCost.
-      // 5,000 free requests/month. Source: Google Maps Platform pricing.
+      // First tier is FREE_TIER free requests/month. Source: Google Maps Platform pricing.
       const PRICE_TIERS = [
-        { max:       5000, rate: 0,       range: "0 – 5,000",            rateLabel: "Free"           },
-        { max:     100000, rate: 0.017,   range: "5,001 – 100,000",      rateLabel: "$17.00 / 1,000" },
+        { max: FREE_TIER,  rate: 0,       range: `0 – ${FREE_TIER.toLocaleString()}`,                 rateLabel: "Free"           },
+        { max:     100000, rate: 0.017,   range: `${(FREE_TIER + 1).toLocaleString()} – 100,000`,     rateLabel: "$17.00 / 1,000" },
         { max:     500000, rate: 0.0136,  range: "100,001 – 500,000",    rateLabel: "$13.60 / 1,000" },
         { max:    1000000, rate: 0.0102,  range: "500,001 – 1,000,000",  rateLabel: "$10.20 / 1,000" },
         { max:    5000000, rate: 0.0051,  range: "1,000,001 – 5,000,000",rateLabel: "$5.10 / 1,000"  },
@@ -429,7 +433,7 @@
           let note = "";
           if (active) {
             note = i === 0
-              ? (count === 0 ? "← no queries yet" : `← ${(5000 - count).toLocaleString()} free remaining`)
+              ? (count === 0 ? "← no queries yet" : `← ${(FREE_TIER - count).toLocaleString()} free remaining`)
               : "← current tier";
           }
           const row = document.createElement("div");
@@ -787,14 +791,14 @@
           const currentUsage = loadUsageCount();
           // Only refine with a cache pre-check when an upper-bound estimate would
           // warn at all — avoids an extra round-trip for small / cheap batches.
-          const mightWarn = (currentUsage + allQueries) > 5000
+          const mightWarn = (currentUsage + allQueries) > FREE_TIER
             || allQueries > COST_CONFIRM_THRESHOLD;
           const cachedCount = mightWarn
             ? await cacheCheck(uniqueQueries, token, password)
             : 0;
           const billable       = Math.max(0, allQueries - cachedCount);
           const projectedTotal = currentUsage + billable;     // billable only
-          const willIncurCost  = projectedTotal > 5000 && billable > 0;
+          const willIncurCost  = projectedTotal > FREE_TIER && billable > 0;
           const isLargeBatch   = allQueries > COST_CONFIRM_THRESHOLD;
 
           if (willIncurCost || isLargeBatch) {
@@ -814,7 +818,7 @@
                 (cachedNote ? ` — ${cachedNote}.` : `.`) + `</p>` +
                 `<p>Your monthly billable total (app-wide, all keys) will reach ` +
                 `<strong>${projectedTotal.toLocaleString()}</strong> queries.</p>` +
-                `<p>Queries past 5,000 / month are billed at Place Details Pro rates:<br>` +
+                `<p>Queries past ${FREE_TIER.toLocaleString()} / month are billed at Place Details Pro rates:<br>` +
                 `<strong>+$${addedCost.toFixed(2)}</strong> for this batch &nbsp;·&nbsp; ` +
                 `<strong>$${projCost.toFixed(2)}</strong> projected monthly total.</p>` +
                 `<p style="color:var(--muted);font-size:12.5px">` +
