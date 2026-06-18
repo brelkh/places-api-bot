@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from flask import Flask, jsonify, request  # noqa: E402
 
 from places_bot import config, fields as fields_mod, processor, service  # noqa: E402
-from places_bot import usage_store  # noqa: E402
+from places_bot import cache as place_cache, usage_store  # noqa: E402
 from places_bot.client import PlacesClient  # noqa: E402
 
 app = Flask(__name__)
@@ -238,7 +238,29 @@ def _handle_process_json():
         chosen_key, key_used, key_warning, _, err = _choose_key_json(data)
         if err is not None:
             return err
-        return jsonify({"key_used": key_used, "key_warning": key_warning})
+        # Structured signal for the browser's "forward the user key?" decision —
+        # robust vs. parsing the human-readable key_used string. True only when
+        # the key that will actually be used IS the user's provided key.
+        user_key = (data.get("api_key") or "").strip()
+        used_user_key = bool(user_key) and chosen_key == user_key
+        return jsonify(
+            {
+                "key_used": key_used,
+                "key_warning": key_warning,
+                "used_user_key": used_user_key,
+            }
+        )
+
+    # Read-only cache pre-check used to refine the cost-confirmation modal: how
+    # many of these queries are already cached (and so cost no API call). No
+    # Google calls, no counter increment, no rate limit — just a Redis MGET.
+    if data.get("cache_check"):
+        names = data.get("queries") or []
+        if not place_cache.is_enabled() or not names:
+            return jsonify({"cache_enabled": place_cache.is_enabled(), "cached_count": 0})
+        full = [service.full_query(n, config.DEFAULT_QUERY_SUFFIX) for n in names]
+        cached = place_cache.get_many(full)
+        return jsonify({"cache_enabled": True, "cached_count": len(cached)})
 
     queries = data.get("queries")
     if not isinstance(queries, list):
@@ -278,6 +300,7 @@ def _handle_process_json():
         fields=fields,
         dedupe=False,
         max_workers=MAX_WORKERS,
+        cache=place_cache,
     )
 
     results = []
@@ -293,6 +316,7 @@ def _handle_process_json():
         {
             "results": results,
             "api_calls": total_calls,
+            "cache_hits": summary.cache_hits,
             "error_count": summary.error_count,
             "error_reasons": summary.error_reasons,
             "key_used": key_used,
@@ -395,7 +419,7 @@ def _handle_process_multipart():
     places_client = PlacesClient(api_key=chosen_key)
     summary = service.lookup_statuses(
         rows, query_col, suffix=suffix, client=places_client, fields=fields,
-        dedupe=True, max_workers=MAX_WORKERS,
+        dedupe=True, max_workers=MAX_WORKERS, cache=place_cache,
     )
 
     total_calls = summary.api_calls + probe_calls
@@ -411,6 +435,7 @@ def _handle_process_multipart():
             "csv": processor.rows_to_csv(fieldnames, rows, fields),
             "row_count": len(rows),
             "api_calls": total_calls,
+            "cache_hits": summary.cache_hits,
             "summary": dict(status_counts),
             "key_used": key_used,
             "key_warning": key_warning,

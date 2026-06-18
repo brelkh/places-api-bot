@@ -157,15 +157,11 @@ def resolve_fields(ids: list[str] | None = None) -> list[FieldSpec]:
     return [f for f in FIELD_CATALOG if f.id in wanted]
 
 
-def build_field_mask(fields: list[FieldSpec]) -> str:
-    """Comma-joined `X-Goog-FieldMask` for Text Search (includes 'places.' prefix)."""
-    return ",".join(f.mask for f in fields)
-
-
 def build_details_field_mask(fields: list[FieldSpec]) -> str:
     """Comma-joined `X-Goog-FieldMask` for Place Details calls.
 
-    Place Details paths drop the leading 'places.' that Text Search paths carry.
+    `FieldSpec.mask` carries a leading 'places.' (the Text Search form); Place
+    Details paths drop it, so it's stripped here.
     """
     return ",".join(f.mask.removeprefix("places.") for f in fields)
 

@@ -38,18 +38,19 @@ columns → rows are written back to CSV.
 
 | Path | What lives here |
 | --- | --- |
-| `places_bot/fields.py` | **Field catalog** — Pro-tier `FieldSpec`s, `resolve_fields`, `build_field_mask`, `build_details_field_mask`, `field_columns`, status labels. The whitelist that caps the pricing tier. |
+| `places_bot/fields.py` | **Field catalog** — Pro-tier `FieldSpec`s, `resolve_fields`, `build_details_field_mask`, `field_columns`, status labels. The whitelist that caps the pricing tier. |
 | `places_bot/config.py` | Constants + `get_api_key()`. `FIELD_MASK` = `"places.id"` (IDs-only for Text Search), `PLACE_DETAILS_URL`, endpoint URL, defaults, threshold. |
 | `places_bot/client.py` | `PlacesClient` — `search_text` (IDs-only), `get_place_details` (Pro fields), retry/backoff, **thread-local sessions**. `PlacesAPIError.reason` + `classify_error`. |
-| `places_bot/service.py` | `lookup_statuses()` (dedupe + concurrency, returns `LookupSummary` with error reasons) and `probe_key()`. The shared engine. |
+| `places_bot/service.py` | `lookup_statuses()` (dedupe + concurrency, optional `cache=`, returns `LookupSummary` with error reasons + `cache_hits`) and `probe_key()`. The shared engine. Internals: `raw_lookup` (place dict / None / `PlacesAPIError`) + `summarize`; `_lookup_cached` is the cache-backed variant. |
 | `places_bot/processor.py` | CSV read/write (file + in-memory). `summarize_places`/`error_summary`/`output_fieldnames`/`rows_to_csv` all take `fields`. `detect_query_column`. |
 | `places_bot/cli.py` | argparse CLI (`--fields`), cost-threshold prompt, progress, usage tracking, error summary. |
 | `places_bot/usage.py` | `UsageTracker` — best-effort local monthly call counter (`.places_usage.json`). CLI only. |
 | `places_bot/usage_store.py` | Shared, durable monthly counter backed by **Upstash Redis** over its REST API (via `requests`). `increment_api_calls`/`get_api_usage`/`is_configured`. Web only; no-ops gracefully when env vars absent. Keys: `places_api_calls:<YYYY-MM>` + `places_api_calls:total`. |
-| `api/process.py` | Flask function for Vercel. 4 routes: `GET /api/fields`, `GET /api/usage` (shared counter, no auth), `POST /api/verify` (password→token, rate-limited), `POST /api/process` (multipart legacy + JSON chunk mode + JSON `probe_only` key check). In-memory `RateLimiter` (counts rows, not requests). |
-| `public/index.html` | Vanilla-JS single-page UI (no build step). Owns CSV parse/dedupe/chunk/merge entirely — the server is stateless between chunks. Verifies password first, then processes. Usage widget seeds from `GET /api/usage` (shared) and falls back to `localStorage` when the store isn't configured. |
+| `places_bot/cache.py` | Web-only day-cache for Place Details payloads, **same Upstash store** (reuses `usage_store._config`). `get_many` (batched `MGET`), `set_many` (one pipeline of `SET … EX`), `is_enabled`. Keys: `place_cache:<normalised query>`; TTL `PLACE_CACHE_TTL` (default 24h). No-ops without Redis. |
+| `api/process.py` | Flask function for Vercel. 4 routes: `GET /api/fields`, `GET /api/usage` (shared counter, no auth), `POST /api/verify` (password→token, rate-limited), `POST /api/process` (multipart legacy + JSON chunk mode + JSON `probe_only` key check + JSON `cache_check` read-only cache pre-check). In-memory `RateLimiter` (counts rows, not requests). |
+| `public/index.html` | Vanilla-JS single-page UI (no build step). Owns CSV parse/dedupe/chunk/merge entirely — the server is stateless between chunks. Verifies password first, then processes. Usage widget seeds from `GET /api/usage` (shared, app-wide/all-keys) and falls back to `localStorage`. Cost modal calls `cache_check` and estimates on cache **misses**. |
 | `vercel.json` | Bundles `places_bot/**` with the function, 60s `maxDuration`. |
-| `tests/` | `test_processor.py`, `test_service.py`, `test_cli.py`, `test_web.py`, `test_usage_store.py`. All stub the network. |
+| `tests/` | `test_processor.py`, `test_service.py`, `test_cli.py`, `test_web.py`, `test_usage_store.py`, `test_cache.py`. All stub the network. |
 | `.github/workflows/places-status.yml` | `workflow_dispatch` CI run that uploads the output CSV as an artifact. |
 
 ## Invariants — don't break these
@@ -59,14 +60,17 @@ columns → rows are written back to CSV.
    **by id**, and `resolve_fields` ignores unknown ids — so a request can never
    escalate into the pricier **Enterprise** tier (opening hours, phone, rating,
    website). To add a field: add a `FieldSpec` with its `mask` (e.g.
-   `places.businessStatus`) + extractor, after verifying it is Pro. The mask is
-   used for Text Search display (with `places.` prefix) and Place Details (prefix
-   stripped by `build_details_field_mask`). Never add an Enterprise field here.
+   `places.businessStatus`) + extractor, after verifying it is Pro. The `places.`
+   prefix on the mask is stripped for the Place Details call by
+   `build_details_field_mask`. Never add an Enterprise field here.
 2. **Two-step lookup pattern.** Each query makes two API calls: (a) Text Search
    IDs-only (free) to get the place ID, then (b) Place Details Pro to fetch the
-   requested fields. **Never** revert to a single Text Search Pro call — it costs
-   more for the same data. Both steps run inside the same `call()` closure in
-   `service.lookup_statuses`.
+   fields. **Never** revert to a single Text Search Pro call — it costs more for
+   the same data. Both steps run inside `service.lookup_statuses::raw_lookup`.
+   The frontend cost table (`PRICE_TIERS` in `public/index.html`) must track the
+   **Place Details Pro** SKU (currently $17/1,000, 5,000 free/mo), not Text
+   Search Pro — that's the billable step. Prices shown per 1,000; `rate` is
+   per-query for `calcMonthlyCost`.
 3. **One engine.** CLI and web both go through `service.lookup_statuses`, which is
    field-driven (`summarize_places`/`error_summary`/CSV helpers all take the
    resolved `fields`). Keep it that way.
@@ -76,7 +80,8 @@ columns → rows are written back to CSV.
 5. **Secrets via env, never committed.** `GOOGLE_MAPS_API_KEY` (CLI + web),
    `APP_PASSWORD` (web; also signs the verify token), and the optional Upstash
    pair `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (web shared
-   counter). The resolver also accepts `KV_REST_API_URL` / `KV_REST_API_TOKEN`
+   counter **and** day-cache) plus optional `PLACE_CACHE_TTL` (seconds, default
+   86400). The resolver also accepts `KV_REST_API_URL` / `KV_REST_API_TOKEN`
    and any prefixed variant ending in those suffixes (Vercel's integration emits
    e.g. `UPSTASH_REDIS_REST_KV_REST_API_URL`); the `*_READ_ONLY_TOKEN` is never
    used since it can't `INCRBY`.
@@ -86,6 +91,9 @@ columns → rows are written back to CSV.
 6. **Dedupe = cost control.** Identical queries are looked up once. `LookupSummary.
    api_calls` ≤ rows (+1 if a user key is probed). Each counted call = one Place
    Details Pro call (the IDs-only Text Search is free and not counted separately).
+   With the day-cache on, `api_calls` counts **misses only**; cache hits cost $0
+   and are reported separately as `cache_hits` (and must never inflate the usage
+   counter).
 7. **Auth before upload.** The browser calls `POST /api/verify` first and only
    uploads the CSV on success; the server still re-checks (token or password) on
    `POST /api/process`. Keep this order — don't let `/api/process` parse a body
@@ -97,6 +105,14 @@ columns → rows are written back to CSV.
    `api_calls`) after each lookup. If Upstash env vars are absent the counter
    reads 0/`not_configured` and writes are silently skipped — never let a slow or
    missing store break a lookup.
+9. **Day-cache is web-only and stores the full Pro payload.** `api/process.py`
+   passes `cache=places_bot.cache` to `lookup_statuses`; the **CLI passes no
+   cache** (deliberate — it's only used for local testing and we don't want it
+   talking to Upstash). On a cache miss the Place Details call fetches the
+   **full `FIELD_CATALOG` mask** (same Pro price as one field) so a later request
+   for different fields still hits cache; the response is then filtered to the
+   requested `fields`. Cache writes store **found places only** (never not-found
+   / errors). Best-effort, same as the counter: no-op without Redis.
 
 ## Commands
 

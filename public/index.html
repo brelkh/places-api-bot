@@ -120,7 +120,12 @@
       .banner.warn { background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn-ink); }
       .banner.err { background: var(--err-bg); border: 1px solid var(--err-line); color: var(--err-ink); }
       .pills { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 16px; }
+      .key-caption { font-size: 13px; color: var(--muted); margin: -10px 0 16px; display: inline-flex; align-items: center; }
       .pill { font-size: 13px; font-weight: 600; padding: 5px 11px; border-radius: 999px; background: var(--other-bg); color: var(--other); }
+      .info { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; margin-left:6px; border-radius:50%; border:1px solid currentColor; font-size:9px; font-weight:700; font-style:normal; line-height:1; cursor:help; opacity:.6; position:relative; vertical-align:middle; }
+      .info:hover, .info:focus { opacity:1; outline:none; }
+      .info::after { content:attr(data-tip); position:absolute; bottom:160%; left:50%; transform:translateX(-50%); background:var(--ink); color:#fff; padding:8px 10px; border-radius:8px; font-size:12px; font-weight:500; font-style:normal; line-height:1.4; text-align:left; white-space:normal; width:max-content; max-width:230px; opacity:0; visibility:hidden; pointer-events:none; transition:opacity .12s; z-index:20; box-shadow:0 4px 14px rgba(0,0,0,.18); }
+      .info:hover::after, .info:focus::after, .info.show::after { opacity:1; visibility:visible; }
       .summary-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
       .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
       table { border-collapse: collapse; width: 100%; font-size: 14px; }
@@ -265,6 +270,7 @@
           <button id="download" type="button">Download CSV</button>
         </div>
         <div class="pills" id="pills"></div>
+        <div class="key-caption hidden" id="keyCaption"></div>
         <div class="table-scroll">
           <table id="table"><thead></thead><tbody></tbody></table>
         </div>
@@ -339,13 +345,17 @@
       const USAGE_STORAGE_KEY = "rsl_monthly_usage";
       // Shared-counter state, seeded from /api/usage on load.
       let serverUsage = { configured: false, count: 0 };
+      // Places API (New) "Place Details Pro" SKU — the billable step of our
+      // two-step lookup (the IDs-only Text Search step is free). Prices are per
+      // 1,000 requests; `rate` is the per-query cost used by calcMonthlyCost.
+      // 5,000 free requests/month. Source: Google Maps Platform pricing.
       const PRICE_TIERS = [
-        { max:       5000, rate: 0,      range: "0 – 5,000",            rateLabel: "Free"            },
-        { max:     100000, rate: 0.032,  range: "5,001 – 100,000",       rateLabel: "$0.032 / query"  },
-        { max:     500000, rate: 0.0256, range: "100,001 – 500,000",     rateLabel: "$0.0256 / query" },
-        { max:    1000000, rate: 0.0192, range: "500,001 – 1,000,000",   rateLabel: "$0.0192 / query" },
-        { max:    5000000, rate: 0.0096, range: "1,000,001 – 5,000,000", rateLabel: "$0.0096 / query" },
-        { max: Infinity,   rate: 0.0024, range: "5,000,001+",            rateLabel: "$0.0024 / query" },
+        { max:       5000, rate: 0,       range: "0 – 5,000",            rateLabel: "Free"           },
+        { max:     100000, rate: 0.017,   range: "5,001 – 100,000",      rateLabel: "$17.00 / 1,000" },
+        { max:     500000, rate: 0.0136,  range: "100,001 – 500,000",    rateLabel: "$13.60 / 1,000" },
+        { max:    1000000, rate: 0.0102,  range: "500,001 – 1,000,000",  rateLabel: "$10.20 / 1,000" },
+        { max:    5000000, rate: 0.0051,  range: "1,000,001 – 5,000,000",rateLabel: "$5.10 / 1,000"  },
+        { max: Infinity,   rate: 0.00128, range: "5,000,001+",           rateLabel: "$1.28 / 1,000"  },
       ];
 
       function usageMonthKey() {
@@ -404,7 +414,7 @@
         const d = new Date();
         const monthLabel = d.toLocaleString("default", { month: "long", year: "numeric" });
         $("usageMonth").textContent = serverUsage.configured
-          ? monthLabel + " · shared across all users"
+          ? monthLabel + " · app-wide total, all keys (incl. personal)"
           : monthLabel;
         // The shared counter is global and authoritative, so a per-browser
         // "Reset" would be misleading — only show it in localStorage fallback.
@@ -699,6 +709,26 @@
         $("progressWrap").classList.add("hidden");
       }
 
+      // Ask the server (read-only, no API call / no charge) how many of these
+      // queries are already cached, to refine the cost modal. Returns 0 on any
+      // failure or when caching is off, so the caller falls back to the
+      // upper-bound estimate.
+      async function cacheCheck(names, token, password) {
+        try {
+          const resp = await fetch("/api/process", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-App-Token": token,
+              "X-App-Password": password,
+            },
+            body: JSON.stringify({ cache_check: true, queries: names }),
+          });
+          if (!resp.ok) return 0;
+          return (await resp.json()).cached_count || 0;
+        } catch { return 0; }
+      }
+
       // --------------------------------------------------------------------------
       // Form submit → chunked lookup flow
       // --------------------------------------------------------------------------
@@ -753,12 +783,25 @@
           const duplicatesSkipped = nonEmptyRows - uniqueQueries.length;
 
           // ── 4. Cost / size confirmation (in-page modal, never blocked) ────────
-          const currentUsage   = loadUsageCount();
-          const projectedTotal = currentUsage + uniqueQueries.length;
-          const willIncurCost  = projectedTotal > 5000;
-          const isLargeBatch   = uniqueQueries.length > COST_CONFIRM_THRESHOLD;
+          const allQueries   = uniqueQueries.length;
+          const currentUsage = loadUsageCount();
+          // Only refine with a cache pre-check when an upper-bound estimate would
+          // warn at all — avoids an extra round-trip for small / cheap batches.
+          const mightWarn = (currentUsage + allQueries) > 5000
+            || allQueries > COST_CONFIRM_THRESHOLD;
+          const cachedCount = mightWarn
+            ? await cacheCheck(uniqueQueries, token, password)
+            : 0;
+          const billable       = Math.max(0, allQueries - cachedCount);
+          const projectedTotal = currentUsage + billable;     // billable only
+          const willIncurCost  = projectedTotal > 5000 && billable > 0;
+          const isLargeBatch   = allQueries > COST_CONFIRM_THRESHOLD;
 
           if (willIncurCost || isLargeBatch) {
+            const cachedNote = cachedCount > 0
+              ? `<strong>${cachedCount.toLocaleString()}</strong> already cached (free), ` +
+                `<strong>${billable.toLocaleString()}</strong> new`
+              : null;
             let title, body;
             if (willIncurCost) {
               const projCost  = calcMonthlyCost(projectedTotal);
@@ -766,18 +809,25 @@
               const addedCost = projCost - prevCost;
               title = "This batch will incur charges";
               body  =
-                `<p>Your monthly total will reach <strong>${projectedTotal.toLocaleString()}</strong> queries ` +
-                `after this batch of <strong>${uniqueQueries.length.toLocaleString()}</strong>.</p>` +
+                `<p>This batch is <strong>${allQueries.toLocaleString()}</strong> ` +
+                `quer${allQueries !== 1 ? "ies" : "y"}` +
+                (cachedNote ? ` — ${cachedNote}.` : `.`) + `</p>` +
+                `<p>Your monthly billable total (app-wide, all keys) will reach ` +
+                `<strong>${projectedTotal.toLocaleString()}</strong> queries.</p>` +
                 `<p>Queries past 5,000 / month are billed at Place Details Pro rates:<br>` +
                 `<strong>+$${addedCost.toFixed(2)}</strong> for this batch &nbsp;·&nbsp; ` +
                 `<strong>$${projCost.toFixed(2)}</strong> projected monthly total.</p>` +
                 `<p style="color:var(--muted);font-size:12.5px">` +
-                `The Google Cloud console is the authoritative source for billing.</p>`;
+                `Cost is based on cache misses. The Google Cloud console is the ` +
+                `authoritative source for billing.</p>`;
             } else {
               title = "Large batch — confirm";
               body  =
-                `<p>This will look up <strong>${uniqueQueries.length.toLocaleString()} places</strong> ` +
-                `(~${uniqueQueries.length.toLocaleString()} API calls). Continue?</p>`;
+                `<p>This will look up <strong>${allQueries.toLocaleString()} places</strong>` +
+                (cachedNote
+                  ? ` (${cachedNote} API call${billable !== 1 ? "s" : ""}).`
+                  : ` (~${allQueries.toLocaleString()} API calls).`) +
+                ` Continue?</p>`;
             }
             const ok = await showCostModal(title, body);
             if (!ok) {
@@ -814,13 +864,16 @@
             if (!probeResp.ok) throw new Error(probeData.error || "Key probe failed.");
             keyUsed = probeData.key_used;
             keyWarning = probeData.key_warning;
-            // Only forward the key in chunks if the probe accepted it.
-            sendApiKey = !!(keyUsed && keyUsed.includes("your key"));
+            // Forward the user key to the chunk loop only if the probe actually
+            // chose it. Uses the server's structured flag (not the display
+            // string, which is overloaded — a failure also contains "your key").
+            sendApiKey = !!probeData.used_user_key;
           }
 
           // ── 6. Chunk loop (sequential, 75 queries at a time) ───────────────
           const resultsByQuery = new Map(); // query → flat result object from server
           let totalApiCalls = 0;
+          let totalCacheHits = 0;
           let totalErrorCount = 0;
           const allErrorReasons = {};
           let chunkFailures = 0;
@@ -851,6 +904,7 @@
 
               data.results.forEach((r) => resultsByQuery.set(r.query, r));
               totalApiCalls += data.api_calls || 0;
+              totalCacheHits += data.cache_hits || 0;
               addUsageQueries(data.api_calls || 0);
               totalErrorCount += data.error_count || 0;
               if (data.error_reasons) {
@@ -911,13 +965,7 @@
             return out;
           });
 
-          // ── 8. Build summary counts and error banner ───────────────────────
-          const summary = {};
-          outputRows.forEach((r) => {
-            const label = r.business_status_label || "";
-            summary[label] = (summary[label] || 0) + 1;
-          });
-
+          // ── 8. Build the error banner ──────────────────────────────────────
           let errorBannerText = null;
           if (totalErrorCount > 0) {
             const topEntry = Object.entries(allErrorReasons)
@@ -947,6 +995,7 @@
             rows: outputRows,
             columns: outputHeaders,
             api_calls: totalApiCalls,
+            cache_hits: totalCacheHits,
             row_count: dataRows.length,
             error_count: totalErrorCount,
             error_banner: errorBannerText,
@@ -955,7 +1004,6 @@
             duplicates_skipped: duplicatesSkipped,
             csv: csvStringify(outputHeaders, outputRows),
             filename: "restaurant_status.csv",
-            summary,
           });
           setStatus("");
 
@@ -986,6 +1034,51 @@
         return "other";
       }
 
+      // A hover/focus/tap "i" explainer icon.
+      function makeInfo(tip) {
+        const i = document.createElement("span");
+        i.className = "info";
+        i.textContent = "i";
+        i.tabIndex = 0;
+        i.setAttribute("role", "note");
+        i.setAttribute("data-tip", tip);
+        i.setAttribute("aria-label", tip);
+        // Hover covers desktop; tap-to-toggle covers touch (no :hover there).
+        i.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          const open = i.classList.contains("show");
+          document.querySelectorAll(".info.show").forEach((el) => el.classList.remove("show"));
+          if (!open) i.classList.add("show");
+        });
+        return i;
+      }
+
+      // A summary pill, optionally with an "i" explainer.
+      function makePill(text, tip) {
+        const s = document.createElement("span");
+        s.className = "pill";
+        s.textContent = text;
+        if (tip) s.appendChild(makeInfo(tip));
+        return s;
+      }
+      // Tap anywhere else dismisses an open tooltip (touch devices).
+      document.addEventListener("click", () => {
+        document.querySelectorAll(".info.show").forEach((el) => el.classList.remove("show"));
+      });
+
+      // Plain-language label for which API key did the lookups. (The raw server
+      // strings drive control flow, so we only translate them for display.)
+      function keyLabel(k) {
+        if (!k) return null;
+        if (k.includes("your key failed"))
+          return { text: "The app key was used (Your key failed)", tip: "Your key didn't work, so the app's built-in key was used instead — see the note above." };
+        if (k.includes("your key"))
+          return { text: "Your key was used", tip: "Lookups used the personal Google API key you entered." };
+        if (k.includes("app's key"))
+          return { text: "The app key was used", tip: "The app's built-in Google API key (the shared default). To use your own, paste it in the “Use your own Google API key” field." };
+        return { text: k, tip: null };
+      }
+
       function render(data) {
         csvText = data.csv;
         csvName = data.filename || "restaurant_status.csv";
@@ -999,29 +1092,46 @@
         eb.textContent = data.error_banner || "";
 
         const pills = $("pills");
-        pills.innerHTML =
-          `<span class="pill">${data.row_count} row${data.row_count !== 1 ? "s" : ""}` +
-          ` · ${data.api_calls} API call${data.api_calls !== 1 ? "s" : ""}` +
-          (data.key_used ? ` · ${esc(data.key_used)}` : "") +
-          `</span>`;
+        pills.innerHTML = "";
 
-        if (data.duplicates_skipped > 0) {
-          const s = document.createElement("span");
-          s.className = "pill";
-          s.textContent =
-            `${data.duplicates_skipped} duplicate row` +
-            `${data.duplicates_skipped !== 1 ? "s" : ""} skipped`;
-          pills.appendChild(s);
+        // Order: rows → from cache → API calls → which key → notable statuses.
+        pills.appendChild(
+          makePill(`${data.row_count} row${data.row_count !== 1 ? "s" : ""}`)
+        );
+
+        if (data.cache_hits > 0) {
+          pills.appendChild(makePill(
+            `${data.cache_hits} from cache`,
+            "Each restaurant's status is cached for a day, so repeat lookups " +
+            "within 24 hours are served from the cache and cost no API call."
+          ));
         }
 
-        Object.entries(data.summary)
-          .sort((a, b) => b[1] - a[1])
-          .forEach(([label, n]) => {
-            const s = document.createElement("span");
-            s.className = "pill";
-            s.textContent = `${label}: ${n}`;
-            pills.appendChild(s);
-          });
+        pills.appendChild(makePill(
+          `${data.api_calls} API call${data.api_calls !== 1 ? "s" : ""}`,
+          "API calls = restaurants looked up minus the ones already cached. " +
+          "These are the only billable calls, and they're added to this " +
+          "month's usage count."
+        ));
+
+        if (data.duplicates_skipped > 0) {
+          pills.appendChild(makePill(
+            `${data.duplicates_skipped} duplicate row` +
+            `${data.duplicates_skipped !== 1 ? "s" : ""} skipped`
+          ));
+        }
+        // Per-status counts intentionally omitted — they're in the table/CSV.
+
+        // Which key was used reads as a sentence, so it's a caption below the
+        // pills rather than a cramped badge.
+        const caption = $("keyCaption");
+        caption.innerHTML = "";
+        const kl = keyLabel(data.key_used);
+        if (kl) {
+          caption.appendChild(document.createTextNode(kl.text));
+          if (kl.tip) caption.appendChild(makeInfo(kl.tip));
+        }
+        caption.classList.toggle("hidden", !kl);
 
         const cols = data.columns;
         const thead = $("table").querySelector("thead");

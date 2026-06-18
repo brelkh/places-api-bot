@@ -255,7 +255,40 @@ def test_json_probe_only_returns_key_info(client):
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["key_used"] == "the app's key"
+    assert body["used_user_key"] is False  # server key, don't forward
     assert "results" not in body  # no lookup performed
+
+
+def test_probe_used_user_key_flag_true_when_key_accepted(client, monkeypatch):
+    monkeypatch.setattr(web.service, "probe_key", lambda key, **kw: None)  # accepts
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"probe_only": True, "api_key": "good-user-key"},
+        headers={"X-App-Token": token},
+    )
+    body = resp.get_json()
+    assert body["key_used"] == "your key"
+    assert body["used_user_key"] is True
+
+
+def test_probe_used_user_key_flag_false_when_key_failed(client, monkeypatch):
+    # Regression guard: the failure string "the app's key (your key failed)"
+    # contains "your key"; the structured flag must still be False so the
+    # browser does NOT forward the rejected key to the chunk loop.
+    monkeypatch.setattr(
+        web.service, "probe_key",
+        lambda key, **kw: PlacesAPIError("bad", reason="auth"),
+    )
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"probe_only": True, "api_key": "bad-user-key"},
+        headers={"X-App-Token": token},
+    )
+    body = resp.get_json()
+    assert "your key failed" in body["key_used"]
+    assert body["used_user_key"] is False
 
 
 def test_json_requires_auth(client):
@@ -350,3 +383,74 @@ def test_multipart_process_increments_shared_counter(client, monkeypatch):
     )
     assert resp.status_code == 200
     assert calls == [2]
+
+
+# --------------------------------------------------------------------------- #
+# Day-cache integration (cache hits cost no Google call, and aren't counted)
+# --------------------------------------------------------------------------- #
+def test_json_process_reports_and_uses_cache(client, monkeypatch):
+    # Pretend the first query is already cached; the second is a miss.
+    cached = {"McDonald's ARC singapore": {"businessStatus": "OPERATIONAL"}}
+    stored = []
+    monkeypatch.setattr(web.place_cache, "is_enabled", lambda: True)
+    monkeypatch.setattr(
+        web.place_cache, "get_many",
+        lambda qs: {q: cached[q] for q in qs if q in cached},
+    )
+    monkeypatch.setattr(web.place_cache, "set_many", lambda m: stored.append(dict(m)))
+    counted = []
+    monkeypatch.setattr(web.usage_store, "increment_api_calls", lambda n: counted.append(n))
+
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"queries": ["McDonald's ARC", "Gone Forever"]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["cache_hits"] == 1
+    assert body["api_calls"] == 1  # only the miss hit Google
+    assert counted == [1]  # counter charged for the miss only
+    # The miss was found and written back to the cache.
+    assert stored and "Gone Forever singapore" in stored[0]
+
+
+# --------------------------------------------------------------------------- #
+# cache_check mode (read-only pre-check for the cost modal)
+# --------------------------------------------------------------------------- #
+def test_cache_check_counts_cached_without_charging(client, monkeypatch):
+    monkeypatch.setattr(web.place_cache, "is_enabled", lambda: True)
+    # Pretend the first of the two (suffixed) queries is cached.
+    monkeypatch.setattr(
+        web.place_cache, "get_many",
+        lambda full: {full[0]: {"businessStatus": "OPERATIONAL"}},
+    )
+    counted = []
+    monkeypatch.setattr(web.usage_store, "increment_api_calls", lambda n: counted.append(n))
+
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"cache_check": True, "queries": ["McDonald's ARC", "Gone Forever"]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"cache_enabled": True, "cached_count": 1}
+    assert counted == []  # a cache check never charges the counter
+
+
+def test_cache_check_reports_disabled(client):
+    # No Upstash env in the fixture → caching off.
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"cache_check": True, "queries": ["X"]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.get_json() == {"cache_enabled": False, "cached_count": 0}
+
+
+def test_cache_check_requires_auth(client):
+    resp = client.post("/api/process", json={"cache_check": True, "queries": ["X"]})
+    assert resp.status_code == 401
