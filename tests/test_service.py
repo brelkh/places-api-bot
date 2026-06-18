@@ -152,6 +152,40 @@ def test_cache_not_found_is_not_stored():
     assert rows[0]["business_status"] == "NOT_FOUND"
 
 
+def test_cache_hit_returns_only_requested_fields():
+    """A cache entry holds the full Pro payload, but a request for a subset of
+    fields must return only those columns — not the whole cached record."""
+    full_place = {
+        "businessStatus": "OPERATIONAL",
+        "displayName": {"text": "McDonald's"},
+        "formattedAddress": "1 Alexandra Rd",
+        "googleMapsUri": "https://maps.google.com/x",
+        "location": {"latitude": 1.23, "longitude": 4.56},
+        "types": ["restaurant", "cafe"],
+        "id": "place123",
+    }
+    client = FakeClient({})  # everything comes from cache
+    cache = FakeCache({"A singapore": full_place})
+    only_status = fields_mod.resolve_fields(["businessStatus"])
+
+    rows = [{"query": "A"}]
+    summary = service.lookup_statuses(
+        rows, "query", suffix=" singapore", client=client,
+        fields=only_status, dedupe=False, cache=cache,
+    )
+
+    assert summary.cache_hits == 1 and summary.api_calls == 0
+    # Requested columns are present...
+    assert rows[0]["business_status"] == "OPERATIONAL"
+    assert rows[0]["business_status_label"] == "Open"
+    # ...and nothing from the rest of the cached payload leaked in.
+    for leaked in (
+        "matched_name", "matched_address", "google_maps_uri",
+        "latitude", "longitude", "types", "place_id",
+    ):
+        assert leaked not in rows[0]
+
+
 def test_disabled_cache_falls_back_to_normal_path():
     client = FakeClient({"A singapore": {"businessStatus": "OPERATIONAL"}})
     cache = FakeCache(enabled=False)
