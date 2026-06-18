@@ -19,6 +19,7 @@ class FakeClient(PlacesClient):
         self.fail_for = fail_for or set()
         self.fail_reason = fail_reason
         self.calls = []  # tracks search_text calls (= unique queries)
+        self.detail_masks = []  # tracks the field mask used for each details call
 
     def search_text(self, query):
         self.calls.append(query)
@@ -29,9 +30,29 @@ class FakeClient(PlacesClient):
         return [{"id": query}]  # use query string as the fake place ID
 
     def get_place_details(self, place_id, detail_field_mask):
+        self.detail_masks.append(detail_field_mask)
         if place_id in self.fail_for:
             raise PlacesAPIError("boom", reason=self.fail_reason)
         return self.results[place_id]
+
+
+class FakeCache:
+    """In-memory stand-in for places_bot.cache (query → place payload)."""
+
+    def __init__(self, store=None, enabled=True):
+        self.store = dict(store or {})
+        self.enabled = enabled
+        self.set_calls = []  # each set_many payload, in order
+
+    def is_enabled(self):
+        return self.enabled
+
+    def get_many(self, queries):
+        return {q: self.store[q] for q in queries if q in self.store}
+
+    def set_many(self, places):
+        self.set_calls.append(dict(places))
+        self.store.update(places)
 
 
 def _rows(*queries):
@@ -84,6 +105,59 @@ def test_concurrent_matches_sequential_order():
     summary = _run(client, rows, max_workers=8)
     assert summary.api_calls == 20
     assert all(r["business_status_label"] == "Open" for r in rows)
+
+
+# --- caching (web-only path) ---
+def test_cache_hit_skips_google_call():
+    client = FakeClient({})  # client would find nothing; cache provides the data
+    cache = FakeCache({"A singapore": {"businessStatus": "OPERATIONAL"}})
+    rows = _rows("A")
+    summary = _run(client, rows, dedupe=False, cache=cache)
+    assert summary.cache_hits == 1
+    assert summary.api_calls == 0
+    assert client.calls == []  # no Text Search, no Place Details
+    assert rows[0]["business_status_label"] == "Open"
+
+
+def test_cache_miss_fetches_then_stores():
+    client = FakeClient({"A singapore": {"businessStatus": "OPERATIONAL"}})
+    cache = FakeCache()
+    rows = _rows("A")
+    summary = _run(client, rows, dedupe=False, cache=cache)
+    assert summary.api_calls == 1 and summary.cache_hits == 0
+    # The found place was written to the cache for next time.
+    assert cache.store["A singapore"] == {"businessStatus": "OPERATIONAL"}
+    # A second run is now a pure cache hit.
+    client.calls.clear()
+    summary2 = _run(client, _rows("A"), dedupe=False, cache=cache)
+    assert summary2.cache_hits == 1 and summary2.api_calls == 0
+    assert client.calls == []
+
+
+def test_cache_miss_fetches_full_pro_mask():
+    client = FakeClient({"A singapore": {"businessStatus": "OPERATIONAL"}})
+    cache = FakeCache()
+    # DEFAULT fields exclude 'location', but caching fetches the full catalog.
+    _run(client, _rows("A"), dedupe=False, cache=cache)
+    assert "location" in client.detail_masks[0]
+
+
+def test_cache_not_found_is_not_stored():
+    client = FakeClient({})  # "A singapore" not found
+    cache = FakeCache()
+    rows = _rows("A")
+    summary = _run(client, rows, dedupe=False, cache=cache)
+    assert summary.api_calls == 1 and summary.cache_hits == 0
+    assert cache.store == {}  # nothing cached for a not-found query
+    assert rows[0]["business_status"] == "NOT_FOUND"
+
+
+def test_disabled_cache_falls_back_to_normal_path():
+    client = FakeClient({"A singapore": {"businessStatus": "OPERATIONAL"}})
+    cache = FakeCache(enabled=False)
+    summary = _run(client, _rows("A"), dedupe=True, cache=cache)
+    assert summary.api_calls == 1 and summary.cache_hits == 0
+    assert cache.set_calls == []  # cache untouched when disabled
 
 
 def test_probe_key_ok_and_failure():

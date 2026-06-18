@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from flask import Flask, jsonify, request  # noqa: E402
 
 from places_bot import config, fields as fields_mod, processor, service  # noqa: E402
-from places_bot import usage_store  # noqa: E402
+from places_bot import cache as place_cache, usage_store  # noqa: E402
 from places_bot.client import PlacesClient  # noqa: E402
 
 app = Flask(__name__)
@@ -278,6 +278,7 @@ def _handle_process_json():
         fields=fields,
         dedupe=False,
         max_workers=MAX_WORKERS,
+        cache=place_cache,
     )
 
     results = []
@@ -293,6 +294,7 @@ def _handle_process_json():
         {
             "results": results,
             "api_calls": total_calls,
+            "cache_hits": summary.cache_hits,
             "error_count": summary.error_count,
             "error_reasons": summary.error_reasons,
             "key_used": key_used,
@@ -395,7 +397,7 @@ def _handle_process_multipart():
     places_client = PlacesClient(api_key=chosen_key)
     summary = service.lookup_statuses(
         rows, query_col, suffix=suffix, client=places_client, fields=fields,
-        dedupe=True, max_workers=MAX_WORKERS,
+        dedupe=True, max_workers=MAX_WORKERS, cache=place_cache,
     )
 
     total_calls = summary.api_calls + probe_calls
@@ -411,6 +413,7 @@ def _handle_process_multipart():
             "csv": processor.rows_to_csv(fieldnames, rows, fields),
             "row_count": len(rows),
             "api_calls": total_calls,
+            "cache_hits": summary.cache_hits,
             "summary": dict(status_counts),
             "key_used": key_used,
             "key_warning": key_warning,

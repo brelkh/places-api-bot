@@ -15,7 +15,7 @@ from typing import Callable
 
 from . import processor
 from .client import PlacesAPIError, PlacesClient
-from .fields import FieldSpec, build_details_field_mask
+from .fields import FIELD_CATALOG, FieldSpec, build_details_field_mask
 
 
 @dataclass
@@ -23,6 +23,8 @@ class LookupSummary:
     api_calls: int = 0
     error_count: int = 0
     error_reasons: dict[str, int] = field(default_factory=dict)
+    # Queries served from the shared cache (0 Google calls). Web path only.
+    cache_hits: int = 0
 
 
 def full_query(raw_query: str, suffix: str) -> str:
@@ -54,6 +56,7 @@ def lookup_statuses(
     dedupe: bool = True,
     max_workers: int = 1,
     on_result: Callable[[dict[str, str]], None] | None = None,
+    cache=None,
 ) -> LookupSummary:
     """Enrich `rows` in place with the selected columns. Returns a LookupSummary.
 
@@ -61,27 +64,50 @@ def lookup_statuses(
     `dedupe` is True, identical queries are looked up once and shared.
     `on_result`, if given, is called with each row after it is filled (in row
     order), which the CLI uses for progress output.
+
+    `cache`, if given and enabled, is a day-cache (``places_bot.cache``) used by
+    the web path: queries already cached cost no Google call, and freshly looked
+    up places are stored for next time. Because a cached entry must satisfy any
+    later field selection, the Place Details call fetches the **full Pro field
+    set** when caching is on (same Pro-tier price as one field). The CLI passes
+    no cache, so its behaviour is unchanged.
     """
+    use_cache = cache is not None and cache.is_enabled()
 
-    # Pre-compute the Place Details field mask once for all calls in this batch.
-    detail_mask = build_details_field_mask(fields)
+    # With caching on, fetch the full Pro payload so a later request for other
+    # fields still hits the cache; otherwise fetch only what was requested.
+    call_fields = FIELD_CATALOG if use_cache else fields
+    detail_mask = build_details_field_mask(call_fields)
 
-    def call(query: str) -> tuple[dict[str, str], str | None]:
+    def raw_lookup(query: str):
+        """Returns the place dict (found), None (no match), or a PlacesAPIError."""
         try:
             # Step 1: Text Search IDs-only (free tier) — get the place ID.
             id_results = client.search_text(query)
             if not id_results:
-                return processor.summarize_places([], fields), None
+                return None
             place_id = id_results[0].get("id", "")
             if not place_id:
-                return processor.summarize_places([], fields), None
-            # Step 2: Place Details (Pro tier) — fetch the requested fields.
-            place = client.get_place_details(place_id, detail_mask)
-            return processor.summarize_places([place], fields), None
+                return None
+            # Step 2: Place Details (Pro tier) — fetch the fields.
+            return client.get_place_details(place_id, detail_mask)
         except PlacesAPIError as exc:
-            return processor.error_summary(fields, str(exc)), exc.reason
+            return exc
 
-    # Build the list of queries to actually send (deduped or one per row).
+    def summarize(place) -> tuple[dict[str, str], str | None]:
+        if isinstance(place, PlacesAPIError):
+            return processor.error_summary(fields, str(place)), place.reason
+        if place is None:
+            return processor.summarize_places([], fields), None
+        return processor.summarize_places([place], fields), None
+
+    if use_cache:
+        return _lookup_cached(
+            rows, query_col, suffix, raw_lookup, summarize, cache,
+            max_workers, on_result, fields,
+        )
+
+    # --- non-cached path (CLI + any caller without Redis); behaviour unchanged ---
     work: list[str] = []
     seen: set[str] = set()
     for row in rows:
@@ -94,7 +120,7 @@ def lookup_statuses(
         seen.add(query)
         work.append(query)
 
-    results = _execute(call, work, max_workers)
+    results = [summarize(p) for p in _execute(raw_lookup, work, max_workers)]
     result_map = dict(zip(work, results)) if dedupe else None
     result_iter = iter(results)
 
@@ -117,6 +143,57 @@ def lookup_statuses(
 
     return LookupSummary(
         api_calls=len(work), error_count=error_count, error_reasons=dict(reasons)
+    )
+
+
+def _lookup_cached(
+    rows, query_col, suffix, raw_lookup, summarize, cache, max_workers,
+    on_result, fields,
+) -> LookupSummary:
+    """Cache-backed variant: unique queries, MGET hits, look up only the misses,
+    then store the freshly found places. `api_calls` counts misses only."""
+    work: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        raw = (row.get(query_col) or "").strip()
+        if not raw:
+            continue
+        query = full_query(raw, suffix)
+        if query not in seen:
+            seen.add(query)
+            work.append(query)
+
+    cached = cache.get_many(work)  # {query: place dict}
+    misses = [q for q in work if q not in cached]
+    fetched = dict(zip(misses, _execute(raw_lookup, misses, max_workers)))
+
+    # Persist only successfully found places (skip not-found / errors).
+    to_store = {q: p for q, p in fetched.items() if isinstance(p, dict)}
+    cache.set_many(to_store)
+
+    place_by_query = {**cached, **fetched}
+    summary_by_query = {q: summarize(place_by_query.get(q)) for q in work}
+
+    reasons: Counter[str] = Counter()
+    error_count = 0
+    for row in rows:
+        raw = (row.get(query_col) or "").strip()
+        if not raw:
+            summary, reason = processor.error_summary(fields, "empty query"), "empty"
+        else:
+            summary, reason = summary_by_query[full_query(raw, suffix)]
+        if reason:
+            reasons[reason] += 1
+            error_count += 1
+        row.update(summary)
+        if on_result is not None:
+            on_result(row)
+
+    return LookupSummary(
+        api_calls=len(misses),
+        error_count=error_count,
+        error_reasons=dict(reasons),
+        cache_hits=len(cached),
     )
 
 

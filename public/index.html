@@ -339,13 +339,17 @@
       const USAGE_STORAGE_KEY = "rsl_monthly_usage";
       // Shared-counter state, seeded from /api/usage on load.
       let serverUsage = { configured: false, count: 0 };
+      // Places API (New) "Place Details Pro" SKU — the billable step of our
+      // two-step lookup (the IDs-only Text Search step is free). Prices are per
+      // 1,000 requests; `rate` is the per-query cost used by calcMonthlyCost.
+      // 5,000 free requests/month. Source: Google Maps Platform pricing.
       const PRICE_TIERS = [
-        { max:       5000, rate: 0,      range: "0 – 5,000",            rateLabel: "Free"            },
-        { max:     100000, rate: 0.032,  range: "5,001 – 100,000",       rateLabel: "$0.032 / query"  },
-        { max:     500000, rate: 0.0256, range: "100,001 – 500,000",     rateLabel: "$0.0256 / query" },
-        { max:    1000000, rate: 0.0192, range: "500,001 – 1,000,000",   rateLabel: "$0.0192 / query" },
-        { max:    5000000, rate: 0.0096, range: "1,000,001 – 5,000,000", rateLabel: "$0.0096 / query" },
-        { max: Infinity,   rate: 0.0024, range: "5,000,001+",            rateLabel: "$0.0024 / query" },
+        { max:       5000, rate: 0,       range: "0 – 5,000",            rateLabel: "Free"           },
+        { max:     100000, rate: 0.017,   range: "5,001 – 100,000",      rateLabel: "$17.00 / 1,000" },
+        { max:     500000, rate: 0.0136,  range: "100,001 – 500,000",    rateLabel: "$13.60 / 1,000" },
+        { max:    1000000, rate: 0.0102,  range: "500,001 – 1,000,000",  rateLabel: "$10.20 / 1,000" },
+        { max:    5000000, rate: 0.0051,  range: "1,000,001 – 5,000,000",rateLabel: "$5.10 / 1,000"  },
+        { max: Infinity,   rate: 0.00128, range: "5,000,001+",           rateLabel: "$1.28 / 1,000"  },
       ];
 
       function usageMonthKey() {
@@ -821,6 +825,7 @@
           // ── 6. Chunk loop (sequential, 75 queries at a time) ───────────────
           const resultsByQuery = new Map(); // query → flat result object from server
           let totalApiCalls = 0;
+          let totalCacheHits = 0;
           let totalErrorCount = 0;
           const allErrorReasons = {};
           let chunkFailures = 0;
@@ -851,6 +856,7 @@
 
               data.results.forEach((r) => resultsByQuery.set(r.query, r));
               totalApiCalls += data.api_calls || 0;
+              totalCacheHits += data.cache_hits || 0;
               addUsageQueries(data.api_calls || 0);
               totalErrorCount += data.error_count || 0;
               if (data.error_reasons) {
@@ -947,6 +953,7 @@
             rows: outputRows,
             columns: outputHeaders,
             api_calls: totalApiCalls,
+            cache_hits: totalCacheHits,
             row_count: dataRows.length,
             error_count: totalErrorCount,
             error_banner: errorBannerText,
@@ -1011,6 +1018,14 @@
           s.textContent =
             `${data.duplicates_skipped} duplicate row` +
             `${data.duplicates_skipped !== 1 ? "s" : ""} skipped`;
+          pills.appendChild(s);
+        }
+
+        if (data.cache_hits > 0) {
+          const s = document.createElement("span");
+          s.className = "pill";
+          s.textContent =
+            `${data.cache_hits} served from cache (no API call)`;
           pills.appendChild(s);
         }
 

@@ -350,3 +350,34 @@ def test_multipart_process_increments_shared_counter(client, monkeypatch):
     )
     assert resp.status_code == 200
     assert calls == [2]
+
+
+# --------------------------------------------------------------------------- #
+# Day-cache integration (cache hits cost no Google call, and aren't counted)
+# --------------------------------------------------------------------------- #
+def test_json_process_reports_and_uses_cache(client, monkeypatch):
+    # Pretend the first query is already cached; the second is a miss.
+    cached = {"McDonald's ARC singapore": {"businessStatus": "OPERATIONAL"}}
+    stored = []
+    monkeypatch.setattr(web.place_cache, "is_enabled", lambda: True)
+    monkeypatch.setattr(
+        web.place_cache, "get_many",
+        lambda qs: {q: cached[q] for q in qs if q in cached},
+    )
+    monkeypatch.setattr(web.place_cache, "set_many", lambda m: stored.append(dict(m)))
+    counted = []
+    monkeypatch.setattr(web.usage_store, "increment_api_calls", lambda n: counted.append(n))
+
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"queries": ["McDonald's ARC", "Gone Forever"]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["cache_hits"] == 1
+    assert body["api_calls"] == 1  # only the miss hit Google
+    assert counted == [1]  # counter charged for the miss only
+    # The miss was found and written back to the cache.
+    assert stored and "Gone Forever singapore" in stored[0]

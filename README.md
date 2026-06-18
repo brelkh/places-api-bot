@@ -85,6 +85,17 @@ Every lookup uses a **two-step pattern** that minimises cost:
 
 This is cheaper than a single Text Search Pro call because the IDs-only Text
 Search tier is free and Place Details Pro is priced lower than Text Search Pro.
+The usage widget's cost table is priced on the **Place Details Pro** SKU
+($17.00 per 1,000 requests, 5,000 free/month, with Google's volume discounts) —
+the billable step — shown per 1,000 queries the way Google charges.
+
+**Day-cache (web app only).** When an Upstash Redis store is configured, found
+places are cached for 24h (`PLACE_CACHE_TTL` seconds, default `86400`) in the
+same store as the usage counter. Repeat lookups within the window are served
+from cache and cost **zero** Google calls — the results table shows how many
+were "served from cache". Each cached entry holds the full Pro payload, so a
+later request for different fields still hits the cache. The CLI is **not**
+cached (it never talks to Upstash). See [Deploy](#deploy).
 
 All selectable fields live in [`places_bot/fields.py`](places_bot/fields.py)
 and are in the **Pro** tier — never the pricier **Enterprise** tier (opening
@@ -230,12 +241,14 @@ use a strong `APP_PASSWORD`. Uploads are also capped at 4 MB.
    - `GOOGLE_MAPS_API_KEY` — your Places API key
    - `APP_PASSWORD` — the shared password you give your team
    - *(optional)* `MAX_ROWS` (default `750`), `PLACES_MAX_WORKERS` (default `8`)
-3. *(optional)* For the **shared usage counter**, add an Upstash Redis store
-   (**Storage → Marketplace → Upstash**, or **Storage → KV**) and connect it.
-   Vercel populates the REST URL + token (the names vary — `KV_REST_API_*` and
-   any prefixed `…KV_REST_API_*` variant are auto-detected); redeploy. Skip it
-   and the widget just shows a per-browser estimate. The token is read
-   server-side only.
+3. *(optional)* For the **shared usage counter and day-cache**, add an Upstash
+   Redis store (**Storage → Marketplace → Upstash**, or **Storage → KV**) and
+   connect it. Vercel populates the REST URL + token (the names vary —
+   `KV_REST_API_*` and any prefixed `…KV_REST_API_*` variant are auto-detected);
+   redeploy. The same store powers both features. Tune the cache lifetime with
+   `PLACE_CACHE_TTL` (seconds, default `86400`). Skip the store entirely and the
+   app still works — no caching, and the widget shows a per-browser estimate.
+   The token is read server-side only.
 4. Deploy. Share the URL + the password with your team.
 
 Because it scales to zero, it costs nothing when idle; you only pay Google for
