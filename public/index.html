@@ -257,6 +257,20 @@
         </div>
       </form>
 
+      <section class="card hidden" id="results">
+        <div id="keyWarn" class="banner warn hidden"></div>
+        <div id="errBanner" class="banner err hidden"></div>
+        <div class="summary-head">
+          <h2>Results</h2>
+          <button id="download" type="button">Download CSV</button>
+        </div>
+        <div class="pills" id="pills"></div>
+        <div class="table-scroll">
+          <table id="table"><thead></thead><tbody></tbody></table>
+        </div>
+        <p class="hint" id="preview-note"></p>
+      </section>
+
       <div class="card" id="usageCard">
         <div class="usage-header">
           <div>
@@ -278,20 +292,6 @@
         </div>
         <div class="usage-tiers" id="usageTiers"></div>
       </div>
-
-      <section class="card hidden" id="results">
-        <div id="keyWarn" class="banner warn hidden"></div>
-        <div id="errBanner" class="banner err hidden"></div>
-        <div class="summary-head">
-          <h2>Results</h2>
-          <button id="download" type="button">Download CSV</button>
-        </div>
-        <div class="pills" id="pills"></div>
-        <div class="table-scroll">
-          <table id="table"><thead></thead><tbody></tbody></table>
-        </div>
-        <p class="hint" id="preview-note"></p>
-      </section>
 
       <p class="foot">
         Your API key stays on the server. Powered by the Google Places API.
