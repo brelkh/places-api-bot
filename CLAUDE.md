@@ -44,11 +44,12 @@ columns → rows are written back to CSV.
 | `places_bot/service.py` | `lookup_statuses()` (dedupe + concurrency, returns `LookupSummary` with error reasons) and `probe_key()`. The shared engine. |
 | `places_bot/processor.py` | CSV read/write (file + in-memory). `summarize_places`/`error_summary`/`output_fieldnames`/`rows_to_csv` all take `fields`. `detect_query_column`. |
 | `places_bot/cli.py` | argparse CLI (`--fields`), cost-threshold prompt, progress, usage tracking, error summary. |
-| `places_bot/usage.py` | `UsageTracker` — best-effort local monthly call counter (`.places_usage.json`). |
-| `api/process.py` | Flask function for Vercel. 3 routes: `GET /api/fields`, `POST /api/verify` (password→token, rate-limited), `POST /api/process` (multipart legacy + JSON chunk mode + JSON `probe_only` key check). In-memory `RateLimiter` (counts rows, not requests). |
-| `public/index.html` | Vanilla-JS single-page UI (no build step). Owns CSV parse/dedupe/chunk/merge entirely — the server is stateless between chunks. Verifies password first, then processes. |
+| `places_bot/usage.py` | `UsageTracker` — best-effort local monthly call counter (`.places_usage.json`). CLI only. |
+| `places_bot/usage_store.py` | Shared, durable monthly counter backed by **Upstash Redis** over its REST API (via `requests`). `increment_api_calls`/`get_api_usage`/`is_configured`. Web only; no-ops gracefully when env vars absent. Keys: `places_api_calls:<YYYY-MM>` + `places_api_calls:total`. |
+| `api/process.py` | Flask function for Vercel. 4 routes: `GET /api/fields`, `GET /api/usage` (shared counter, no auth), `POST /api/verify` (password→token, rate-limited), `POST /api/process` (multipart legacy + JSON chunk mode + JSON `probe_only` key check). In-memory `RateLimiter` (counts rows, not requests). |
+| `public/index.html` | Vanilla-JS single-page UI (no build step). Owns CSV parse/dedupe/chunk/merge entirely — the server is stateless between chunks. Verifies password first, then processes. Usage widget seeds from `GET /api/usage` (shared) and falls back to `localStorage` when the store isn't configured. |
 | `vercel.json` | Bundles `places_bot/**` with the function, 60s `maxDuration`. |
-| `tests/` | `test_processor.py`, `test_service.py`, `test_cli.py`, `test_web.py`. All stub the network. |
+| `tests/` | `test_processor.py`, `test_service.py`, `test_cli.py`, `test_web.py`, `test_usage_store.py`. All stub the network. |
 | `.github/workflows/places-status.yml` | `workflow_dispatch` CI run that uploads the output CSV as an artifact. |
 
 ## Invariants — don't break these
@@ -72,10 +73,16 @@ columns → rows are written back to CSV.
 4. **Concurrency safety.** The web path runs the two-step lookup across threads.
    The client keeps a `requests.Session` per thread (`threading.local`). Don't add
    shared mutable state across threads (the rate limiter uses a lock).
-5. **Secrets via env, never committed.** `GOOGLE_MAPS_API_KEY` (CLI + web) and
-   `APP_PASSWORD` (web; also signs the verify token). Local: `.env` / shell.
-   Vercel: dashboard env vars. CI: GitHub Secrets. `.env` and
-   `restaurant_status.csv` are git-ignored.
+5. **Secrets via env, never committed.** `GOOGLE_MAPS_API_KEY` (CLI + web),
+   `APP_PASSWORD` (web; also signs the verify token), and the optional Upstash
+   pair `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (web shared
+   counter). The resolver also accepts `KV_REST_API_URL` / `KV_REST_API_TOKEN`
+   and any prefixed variant ending in those suffixes (Vercel's integration emits
+   e.g. `UPSTASH_REDIS_REST_KV_REST_API_URL`); the `*_READ_ONLY_TOKEN` is never
+   used since it can't `INCRBY`.
+   Local: `.env` / shell. Vercel: dashboard env vars. CI: GitHub Secrets. `.env`
+   and `restaurant_status.csv` are git-ignored. The Upstash REST token is read
+   **server-side only** — never sent to the browser.
 6. **Dedupe = cost control.** Identical queries are looked up once. `LookupSummary.
    api_calls` ≤ rows (+1 if a user key is probed). Each counted call = one Place
    Details Pro call (the IDs-only Text Search is free and not counted separately).
@@ -83,6 +90,13 @@ columns → rows are written back to CSV.
    uploads the CSV on success; the server still re-checks (token or password) on
    `POST /api/process`. Keep this order — don't let `/api/process` parse a body
    before authorizing.
+8. **Shared usage counter is best-effort and public-read.** `GET /api/usage`
+   needs no auth (like `/api/fields`) — the page loads it before password entry.
+   It returns counts only, never credentials. `POST /api/process` increments the
+   counter by `summary.api_calls + probe_calls` (the same number it returns as
+   `api_calls`) after each lookup. If Upstash env vars are absent the counter
+   reads 0/`not_configured` and writes are silently skipped — never let a slow or
+   missing store break a lookup.
 
 ## Commands
 

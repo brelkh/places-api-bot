@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from flask import Flask, jsonify, request  # noqa: E402
 
 from places_bot import config, fields as fields_mod, processor, service  # noqa: E402
+from places_bot import usage_store  # noqa: E402
 from places_bot.client import PlacesClient  # noqa: E402
 
 app = Flask(__name__)
@@ -170,6 +171,17 @@ def fields_catalog():
     )
 
 
+@app.get("/api/usage")
+def usage_counter():
+    """Shared monthly API-call count across all users (no auth, like /fields).
+
+    Returns counts only — never the storage credentials. When the Upstash store
+    isn't configured, reports ``storage="not_configured"`` so the UI can fall
+    back gracefully.
+    """
+    return jsonify(usage_store.get_api_usage())
+
+
 @app.post("/api/verify")
 def verify():
     if not _expected_password():
@@ -274,10 +286,13 @@ def _handle_process_json():
         result.update({k: v for k, v in row.items() if k != "q"})
         results.append(result)
 
+    total_calls = summary.api_calls + probe_calls
+    usage_store.increment_api_calls(total_calls)
+
     return jsonify(
         {
             "results": results,
-            "api_calls": summary.api_calls + probe_calls,
+            "api_calls": total_calls,
             "error_count": summary.error_count,
             "error_reasons": summary.error_reasons,
             "key_used": key_used,
@@ -383,6 +398,9 @@ def _handle_process_multipart():
         dedupe=True, max_workers=MAX_WORKERS,
     )
 
+    total_calls = summary.api_calls + probe_calls
+    usage_store.increment_api_calls(total_calls)
+
     status_counts = Counter(r.get("business_status_label", "") for r in rows)
     return jsonify(
         {
@@ -392,7 +410,7 @@ def _handle_process_multipart():
             "rows": rows,
             "csv": processor.rows_to_csv(fieldnames, rows, fields),
             "row_count": len(rows),
-            "api_calls": summary.api_calls + probe_calls,
+            "api_calls": total_calls,
             "summary": dict(status_counts),
             "key_used": key_used,
             "key_warning": key_warning,

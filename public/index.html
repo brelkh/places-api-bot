@@ -184,28 +184,6 @@
         </p>
       </header>
 
-      <div class="card" id="usageCard">
-        <div class="usage-header">
-          <div>
-            <div class="usage-title">Monthly API Usage</div>
-            <div id="usageMonth" style="color:var(--muted);font-size:13px;margin-top:2px"></div>
-          </div>
-          <button type="button" id="resetUsage" class="ghost" style="font-size:12px;padding:5px 10px">Reset</button>
-        </div>
-        <div class="usage-stats">
-          <div class="usage-stat">
-            <div class="usage-stat-label">Queries this month</div>
-            <div class="usage-stat-value" id="usageCount">0</div>
-          </div>
-          <div class="usage-stat-divider"></div>
-          <div class="usage-stat">
-            <div class="usage-stat-label">Estimated cost</div>
-            <div class="usage-stat-value" id="usageCost">$0.00</div>
-          </div>
-        </div>
-        <div class="usage-tiers" id="usageTiers"></div>
-      </div>
-
       <form id="form" class="card">
         <div class="field">
           <label for="password">Access password</label>
@@ -279,6 +257,28 @@
         </div>
       </form>
 
+      <div class="card" id="usageCard">
+        <div class="usage-header">
+          <div>
+            <div class="usage-title">Monthly API Usage</div>
+            <div id="usageMonth" style="color:var(--muted);font-size:13px;margin-top:2px"></div>
+          </div>
+          <button type="button" id="resetUsage" class="ghost" style="font-size:12px;padding:5px 10px">Reset</button>
+        </div>
+        <div class="usage-stats">
+          <div class="usage-stat">
+            <div class="usage-stat-label">Queries this month</div>
+            <div class="usage-stat-value" id="usageCount">0</div>
+          </div>
+          <div class="usage-stat-divider"></div>
+          <div class="usage-stat">
+            <div class="usage-stat-label">Estimated cost</div>
+            <div class="usage-stat-value" id="usageCost">$0.00</div>
+          </div>
+        </div>
+        <div class="usage-tiers" id="usageTiers"></div>
+      </div>
+
       <section class="card hidden" id="results">
         <div id="keyWarn" class="banner warn hidden"></div>
         <div id="errBanner" class="banner err hidden"></div>
@@ -331,8 +331,14 @@
 
       const $ = (id) => document.getElementById(id);
 
-      // ── Monthly usage tracker (localStorage, resets automatically each month) ──
+      // ── Monthly usage tracker ──────────────────────────────────────────────
+      // Primary source is the shared server counter (GET /api/usage), so every
+      // user sees the same app-wide monthly total and the free-tier math (5,000
+      // / month, shared across the app's key) is accurate. localStorage is only
+      // a fallback for when the server store isn't configured (e.g. local dev).
       const USAGE_STORAGE_KEY = "rsl_monthly_usage";
+      // Shared-counter state, seeded from /api/usage on load.
+      let serverUsage = { configured: false, count: 0 };
       const PRICE_TIERS = [
         { max:       5000, rate: 0,      range: "0 – 5,000",            rateLabel: "Free"            },
         { max:     100000, rate: 0.032,  range: "5,001 – 100,000",       rateLabel: "$0.032 / query"  },
@@ -346,14 +352,33 @@
         const d = new Date();
         return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
       }
-      function loadUsageCount() {
+      function loadLocalUsageCount() {
         try {
           const parsed = JSON.parse(localStorage.getItem(USAGE_STORAGE_KEY) || "null");
           return parsed && parsed.month === usageMonthKey() ? (parsed.count || 0) : 0;
         } catch { return 0; }
       }
-      function saveUsageCount(n) {
+      function saveLocalUsageCount(n) {
         try { localStorage.setItem(USAGE_STORAGE_KEY, JSON.stringify({ month: usageMonthKey(), count: n })); } catch {}
+      }
+      // Active count: the shared server total when configured, else the local
+      // per-browser estimate. The cost modal and widget both read this.
+      function loadUsageCount() {
+        return serverUsage.configured ? serverUsage.count : loadLocalUsageCount();
+      }
+      // Pull the authoritative shared count and repaint the widget.
+      async function syncServerUsage() {
+        try {
+          const resp = await fetch("/api/usage");
+          if (!resp.ok) return;
+          const d = await resp.json();
+          if (d.storage && d.storage !== "not_configured") {
+            serverUsage = { configured: true, count: d.monthly_api_calls || 0 };
+          } else {
+            serverUsage = { configured: false, count: 0 };
+          }
+        } catch { /* leave existing state; fall back to localStorage */ }
+        renderUsageWidget();
       }
       function calcMonthlyCost(n) {
         let cost = 0, rem = n, prev = 0;
@@ -377,7 +402,13 @@
         const count = loadUsageCount();
         const cost = calcMonthlyCost(count);
         const d = new Date();
-        $("usageMonth").textContent = d.toLocaleString("default", { month: "long", year: "numeric" });
+        const monthLabel = d.toLocaleString("default", { month: "long", year: "numeric" });
+        $("usageMonth").textContent = serverUsage.configured
+          ? monthLabel + " · shared across all users"
+          : monthLabel;
+        // The shared counter is global and authoritative, so a per-browser
+        // "Reset" would be misleading — only show it in localStorage fallback.
+        $("resetUsage").style.display = serverUsage.configured ? "none" : "";
         $("usageCount").textContent = count.toLocaleString();
         $("usageCost").textContent = "$" + cost.toFixed(2);
         const idx = currentTierIdx(count);
@@ -400,15 +431,22 @@
           tiersEl.appendChild(row);
         });
       }
+      // Optimistic local bump so the widget moves live during chunk processing;
+      // syncServerUsage() reconciles to the authoritative count afterwards.
       function addUsageQueries(n) {
         if (n <= 0) return;
-        saveUsageCount(loadUsageCount() + n);
+        if (serverUsage.configured) {
+          serverUsage.count += n;
+        } else {
+          saveLocalUsageCount(loadLocalUsageCount() + n);
+        }
         renderUsageWidget();
       }
-      renderUsageWidget();
+      renderUsageWidget();      // instant paint from localStorage / zero
+      syncServerUsage();        // then seed from the shared server counter
       $("resetUsage").addEventListener("click", () => {
         if (confirm("Reset the monthly usage counter? This only affects the estimate shown here — your actual Google API usage is tracked in the Google Cloud console.")) {
-          saveUsageCount(0);
+          saveLocalUsageCount(0);
           renderUsageWidget();
         }
       });
@@ -842,6 +880,9 @@
             updateProgress(done, uniqueQueries.length);
             setStatus(`${done} / ${uniqueQueries.length} looked up…`);
           }
+
+          // Reconcile the optimistic bumps with the authoritative shared count.
+          syncServerUsage();
 
           // ── 7. Merge results back into original row order ──────────────────
           const fieldCols = getOutputFieldColumns();

@@ -99,9 +99,13 @@ tier.
 
 The CLI keeps a **local monthly call counter** (`.places_usage.json`) and warns
 before a run would push the current month past a threshold (default `10000`).
-The web app shows a **live monthly usage widget** (stored in `localStorage`)
-with a tiered cost calculator that updates after each chunk. The Google Cloud
-console remains the authoritative source — these are guardrails.
+The web app shows a **live monthly usage widget** with a tiered cost calculator
+that updates after each chunk. With an Upstash Redis store configured (see
+[Deploy](#deploy)) it reads a **shared, app-wide counter** — so every user sees
+the same total, matching how Google's free tier (5,000 calls/month) is shared
+across the app's single key. Without the store it falls back to a per-browser
+`localStorage` estimate. The Google Cloud console remains authoritative — these
+are guardrails.
 
 ## Setup
 
@@ -188,7 +192,7 @@ output CSV — no terminal needed.
 
 ```
 public/index.html   single-page UI (field checkboxes, optional key, results table)
-api/process.py      serverless function: 3 endpoints (see below)
+api/process.py      serverless function: 4 endpoints (see below)
 vercel.json         bundles the places_bot package with the function
 ```
 
@@ -197,6 +201,7 @@ Endpoints in `api/process.py`:
 | route | purpose |
 | --- | --- |
 | `GET /api/fields` | the selectable Pro-tier field catalog (drives the checkboxes) |
+| `GET /api/usage` | shared monthly API-call count (no auth); `not_configured` when the Upstash store is absent |
 | `POST /api/verify` | checks the password **before** any CSV upload; returns a short-lived signed token. Rate-limited per IP. |
 | `POST /api/process` | runs the lookups; gated by the token (or password). Accepts **multipart** (legacy single-shot CSV) or **JSON** (`{ "queries": [...], "fields": [...] }` for the browser's chunk loop; `{ "probe_only": true }` for a one-time key pre-check). |
 
@@ -225,7 +230,13 @@ use a strong `APP_PASSWORD`. Uploads are also capped at 4 MB.
    - `GOOGLE_MAPS_API_KEY` — your Places API key
    - `APP_PASSWORD` — the shared password you give your team
    - *(optional)* `MAX_ROWS` (default `750`), `PLACES_MAX_WORKERS` (default `8`)
-3. Deploy. Share the URL + the password with your team.
+3. *(optional)* For the **shared usage counter**, add an Upstash Redis store
+   (**Storage → Marketplace → Upstash**, or **Storage → KV**) and connect it.
+   Vercel populates the REST URL + token (the names vary — `KV_REST_API_*` and
+   any prefixed `…KV_REST_API_*` variant are auto-detected); redeploy. Skip it
+   and the widget just shows a per-browser estimate. The token is read
+   server-side only.
+4. Deploy. Share the URL + the password with your team.
 
 Because it scales to zero, it costs nothing when idle; you only pay Google for
 the Places API calls.
