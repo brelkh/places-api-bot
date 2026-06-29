@@ -158,6 +158,11 @@ def _error(message: str, status: int, **extra):
     return jsonify({"error": message, **extra}), status
 
 
+def _string_list(value) -> bool:
+    """True if value is a list whose every item is a string."""
+    return isinstance(value, list) and all(isinstance(x, str) for x in value)
+
+
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
@@ -256,6 +261,8 @@ def _handle_process_json():
     # Google calls, no counter increment, no rate limit — just a Redis MGET.
     if data.get("cache_check"):
         names = data.get("queries") or []
+        if not _string_list(names):
+            return _error("'queries' must be a list of strings.", 400)
         if not place_cache.is_enabled() or not names:
             return jsonify({"cache_enabled": place_cache.is_enabled(), "cached_count": 0})
         full = [service.full_query(n, config.DEFAULT_QUERY_SUFFIX) for n in names]
@@ -263,8 +270,8 @@ def _handle_process_json():
         return jsonify({"cache_enabled": True, "cached_count": len(cached)})
 
     queries = data.get("queries")
-    if not isinstance(queries, list):
-        return _error("'queries' must be a list of names.", 400)
+    if not _string_list(queries):
+        return _error("'queries' must be a list of strings.", 400)
     if not queries:
         return _error("'queries' is empty.", 400)
     if len(queries) > MAX_ROWS:
@@ -374,9 +381,9 @@ def _handle_process_multipart():
     if upload is None or not upload.filename:
         return _error("No CSV uploaded (the form field must be named 'file').", 400)
     try:
-        text = upload.read().decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return _error("Could not read the file as a UTF-8 CSV.", 400)
+        text = processor.decode_csv_bytes(upload.read())
+    except ValueError as exc:
+        return _error(str(exc), 400)
     try:
         fieldnames, rows = processor.read_rows_from_text(text)
     except ValueError as exc:

@@ -42,15 +42,15 @@ columns → rows are written back to CSV.
 | `places_bot/config.py` | Constants + `get_api_key()`. `FIELD_MASK` = `"places.id"` (IDs-only for Text Search), `PLACE_DETAILS_URL`, endpoint URL, defaults, threshold. |
 | `places_bot/client.py` | `PlacesClient` — `search_text` (IDs-only), `get_place_details` (Pro fields), retry/backoff, **thread-local sessions**. `PlacesAPIError.reason` + `classify_error`. |
 | `places_bot/service.py` | `lookup_statuses()` (dedupe + concurrency, optional `cache=`, returns `LookupSummary` with error reasons + `cache_hits`) and `probe_key()`. The shared engine. Internals: `raw_lookup` (place dict / None / `PlacesAPIError`) + `summarize`; `_lookup_cached` is the cache-backed variant. |
-| `places_bot/processor.py` | CSV read/write (file + in-memory). `summarize_places`/`error_summary`/`output_fieldnames`/`rows_to_csv` all take `fields`. `detect_query_column`. |
+| `places_bot/processor.py` | CSV read/write (file + in-memory). `summarize_places`/`error_summary`/`output_fieldnames`/`rows_to_csv` all take `fields`. `detect_query_column`. `decode_csv_bytes` (rejects binaries via `looks_binary`, then decodes UTF-8→cp1252) backs **both** the web multipart upload and the CLI `read_rows`. |
 | `places_bot/cli.py` | argparse CLI (`--fields`), cost-threshold prompt, progress, usage tracking, error summary. |
 | `places_bot/usage.py` | `UsageTracker` — best-effort local monthly call counter (`.places_usage.json`). CLI only. |
 | `places_bot/usage_store.py` | Shared, durable monthly counter backed by **Upstash Redis** over its REST API (via `requests`). `increment_api_calls`/`get_api_usage`/`is_configured`. Web only; no-ops gracefully when env vars absent. Keys: `places_api_calls:<YYYY-MM>` + `places_api_calls:total`. |
 | `places_bot/cache.py` | Web-only day-cache for Place Details payloads, **same Upstash store** (reuses `usage_store._config`). `get_many` (batched `MGET`), `set_many` (one pipeline of `SET … EX`), `is_enabled`. Keys: `place_cache:<normalised query>`; TTL `PLACE_CACHE_TTL` (default 24h). No-ops without Redis. |
-| `api/process.py` | Flask function for Vercel. 4 routes: `GET /api/fields`, `GET /api/usage` (shared counter, no auth), `POST /api/verify` (password→token, rate-limited), `POST /api/process` (multipart legacy + JSON chunk mode + JSON `probe_only` key check + JSON `cache_check` read-only cache pre-check). In-memory `RateLimiter` (counts rows, not requests). |
+| `api/process.py` | Flask function for Vercel. 4 routes: `GET /api/fields`, `GET /api/usage` (shared counter, no auth), `POST /api/verify` (password→token, rate-limited), `POST /api/process` (multipart legacy + JSON chunk mode + JSON `probe_only` key check + JSON `cache_check` read-only cache pre-check). In-memory `RateLimiter` (counts rows, not requests). JSON `queries` must be a list of strings (`_string_list` → 400, never a 500); multipart decodes via `processor.decode_csv_bytes`. |
 | `public/index.html` | Vanilla-JS single-page UI (no build step). Owns CSV parse/dedupe/chunk/merge entirely — the server is stateless between chunks. Verifies password first, then processes. Usage widget seeds from `GET /api/usage` (shared, app-wide/all-keys) and falls back to `localStorage`. Cost modal calls `cache_check` and estimates on cache **misses**. |
 | `vercel.json` | Bundles `places_bot/**` with the function, 60s `maxDuration`. |
-| `tests/` | `test_processor.py`, `test_service.py`, `test_cli.py`, `test_web.py`, `test_usage_store.py`, `test_cache.py`. All stub the network. |
+| `tests/` | `test_processor.py`, `test_service.py`, `test_cli.py`, `test_web.py`, `test_usage_store.py`, `test_cache.py`, `test_frontend_smoke.py` (runs the inline `index.html` CSV helpers via `node`; skips if node absent). All stub the network. |
 | `.github/workflows/places-status.yml` | `workflow_dispatch` CI run that uploads the output CSV as an artifact. |
 
 ## Invariants — don't break these
@@ -163,11 +163,13 @@ After making a code change, do these in order:
   it finishes inside the 60s Vercel timeout. The browser sends ≤75 queries per
   chunk, well under this cap. Very large batches (e.g. 20k rows) → use the CLI
   (uncapped).
-- **Browser owns CSV parse/dedupe/chunk/merge.** The frontend parses the CSV
-  (RFC 4180, BOM-aware), detects the query column, deduplicates, and sends at
-  most 75 unique queries per `POST /api/process` JSON request. The server is
-  stateless between chunks. Merging and final CSV generation happen in the
-  browser after all chunks complete.
+- **Browser owns CSV parse/dedupe/chunk/merge.** The frontend reads the file via
+  `readCsvText` (rejects binary/spreadsheet uploads, decodes UTF-8→windows-1252
+  — same ladder as `processor.decode_csv_bytes`), parses the CSV (RFC 4180,
+  BOM-aware), detects the query column, deduplicates, and sends at most 75 unique
+  queries per `POST /api/process` JSON request. The server is stateless between
+  chunks. Merging and final CSV generation happen in the browser after all chunks
+  complete.
 - **Row-counting rate limiter.** `_process_limiter` counts rows (not requests):
   5 000 rows / 10 min per IP. Each JSON chunk charges `len(queries)` rows;
   multipart charges `len(rows)` rows. `_login_limiter` is unchanged (5 attempts

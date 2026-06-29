@@ -133,6 +133,58 @@ def test_enforces_row_limit(client, monkeypatch):
     assert resp.status_code == 413
 
 
+def _upload_bytes(raw: bytes):
+    return {"file": (io.BytesIO(raw), "restaurants.csv")}
+
+
+def test_multipart_rejects_binary_upload(client):
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        data=_upload_bytes(b"PK\x03\x04\x14\x00binary-xlsx-bytes"),
+        content_type="multipart/form-data",
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 400
+    assert "CSV" in resp.get_json()["error"]
+
+
+def test_multipart_recovers_cp1252_encoding(client):
+    token = _token(client)
+    # "Café Bar" exported from Excel is cp1252 (0xE9), not UTF-8.
+    raw = "query\nCafé Bar\n".encode("cp1252")
+    resp = client.post(
+        "/api/process",
+        data=_upload_bytes(raw),
+        content_type="multipart/form-data",
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    # The query is decoded correctly (not mojibake) before lookup.
+    assert resp.get_json()["rows"][0]["query"] == "Café Bar"
+
+
+def test_multipart_preserves_unicode_queries(client):
+    token = _token(client)
+    # Emoji, Chinese, and punctuation must round-trip through the upload intact.
+    raw = "query\nBurger 🍔\n海底捞 Vivocity\nAl-Ameen@Hillview - Bamboo Grove\n".encode(
+        "utf-8"
+    )
+    resp = client.post(
+        "/api/process",
+        data=_upload_bytes(raw),
+        content_type="multipart/form-data",
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 200
+    queries = [r["query"] for r in resp.get_json()["rows"]]
+    assert queries == [
+        "Burger 🍔",
+        "海底捞 Vivocity",
+        "Al-Ameen@Hillview - Bamboo Grove",
+    ]
+
+
 # --- user-supplied key fallback ---
 def test_user_key_failure_falls_back(client, monkeypatch):
     def boom(api_key, **kw):
@@ -294,6 +346,27 @@ def test_probe_used_user_key_flag_false_when_key_failed(client, monkeypatch):
 def test_json_requires_auth(client):
     resp = client.post("/api/process", json={"queries": ["McDonald's ARC"]})
     assert resp.status_code == 401
+
+
+# --- queries must be a list of strings (clean 400, never a 500) ---
+@pytest.mark.parametrize("bad", [[123], ["ok", None], "not-a-list", [{"q": "x"}]])
+def test_json_rejects_non_string_queries(client, bad):
+    token = _token(client)
+    resp = client.post(
+        "/api/process", json={"queries": bad}, headers={"X-App-Token": token}
+    )
+    assert resp.status_code == 400
+    assert "string" in resp.get_json()["error"]
+
+
+def test_cache_check_rejects_non_string_queries(client):
+    token = _token(client)
+    resp = client.post(
+        "/api/process",
+        json={"cache_check": True, "queries": [123]},
+        headers={"X-App-Token": token},
+    )
+    assert resp.status_code == 400
 
 
 # --- row-counting rate limiter ---
