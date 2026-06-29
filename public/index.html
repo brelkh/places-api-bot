@@ -600,6 +600,40 @@
       $("cancelBtn").addEventListener("click", () => { cancelled = true; });
 
       // --------------------------------------------------------------------------
+      // Read a chosen file as CSV text: reject binary (non-CSV) uploads and
+      // tolerate non-UTF-8 (Excel/Windows) exports. Mirrors the server-side
+      // processor.decode_csv_bytes for the multipart path.
+      // --------------------------------------------------------------------------
+      function looksBinaryBytes(buf) {
+        // buf: Uint8Array. Known non-CSV magic numbers, or a NUL byte (which a
+        // text CSV never contains — also catches UTF-16, images, etc.).
+        const magic = (sig) => sig.every((b, k) => buf[k] === b);
+        if (magic([0x50, 0x4b, 0x03, 0x04])) return true; // PK.. → zip/xlsx/ods
+        if (magic([0x25, 0x50, 0x44, 0x46])) return true; // %PDF
+        if (magic([0xd0, 0xcf, 0x11, 0xe0])) return true; // OLE2 → legacy .xls
+        const lim = Math.min(buf.length, 8192);
+        for (let k = 0; k < lim; k++) if (buf[k] === 0) return true;
+        return false;
+      }
+
+      async function readCsvText(file) {
+        const buf = new Uint8Array(await file.arrayBuffer());
+        if (looksBinaryBytes(buf)) {
+          throw new Error(
+            "That doesn't look like a CSV file. If it's a spreadsheet, use " +
+            "File → Save As / Export → CSV (UTF-8) and try again."
+          );
+        }
+        try {
+          // Strict UTF-8 (covers a UTF-8 BOM); throws on invalid byte sequences.
+          return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+        } catch {
+          // Fall back to Windows-1252 — the common Excel-on-Windows export.
+          return new TextDecoder("windows-1252").decode(buf);
+        }
+      }
+
+      // --------------------------------------------------------------------------
       // RFC 4180-compliant CSV parser
       // Handles: quoted fields with embedded commas/newlines, "" escape, CRLF, BOM.
       // --------------------------------------------------------------------------
@@ -762,7 +796,7 @@
           const token = vData.token;
 
           // ── 2. Parse CSV client-side ────────────────────────────────────────
-          const raw = await file.text();
+          const raw = await readCsvText(file);
           const { headers, dataRows } = parseCSV(raw);
           if (dataRows.length === 0) throw new Error("The CSV has no data rows.");
 

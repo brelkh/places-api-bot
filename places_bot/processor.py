@@ -17,6 +17,53 @@ from .fields import FieldSpec
 # Candidate column names to auto-detect the query column (case-insensitive).
 QUERY_COLUMN_CANDIDATES = ("query", "restaurant", "restaurant_name", "name")
 
+# Leading bytes of common non-CSV uploads we want to reject outright.
+_BINARY_MAGIC = (
+    b"PK\x03\x04",        # ZIP container → .xlsx / .ods
+    b"%PDF",              # PDF
+    b"\xd0\xcf\x11\xe0",  # OLE2 → legacy .xls / .doc
+)
+
+
+def looks_binary(raw: bytes) -> bool:
+    """Heuristic: does this byte string look like a binary (non-CSV) file?
+
+    True for known spreadsheet/document magic numbers, or any NUL byte in the
+    first 8 KB (text CSVs never contain NUL — this also catches UTF-16, images,
+    and other binaries).
+    """
+    if raw[:4] in _BINARY_MAGIC:
+        return True
+    return b"\x00" in raw[:8192]
+
+
+def decode_csv_bytes(raw: bytes) -> str:
+    """Decode uploaded CSV bytes to text, tolerating non-UTF-8 exports.
+
+    Rejects binary (non-CSV) uploads with a clear ValueError, then decodes with
+    a deterministic ladder: strict UTF-8 (a BOM is stripped), falling back to
+    Windows-1252 — the common Excel-on-Windows export — so accented names are
+    read correctly instead of producing mojibake. This mirrors the browser's
+    client-side `readCsvText` (UTF-8 → windows-1252) so both paths behave the
+    same. (Statistical detection, e.g. charset_normalizer, was tried but proved
+    unreliable on the short inputs we get and diverged from the frontend.)
+
+    Used by the web multipart path; the browser does the equivalent client-side
+    before sending JSON chunks.
+    """
+    if not raw:
+        return ""  # let the caller report the empty-CSV case
+    if looks_binary(raw):
+        raise ValueError(
+            "This doesn't look like a CSV file (it appears to be a spreadsheet "
+            "or other binary file). Export it as CSV and try again."
+        )
+    try:
+        return raw.decode("utf-8-sig")  # strict UTF-8; drops a leading BOM
+    except UnicodeDecodeError:
+        # cp1252 leaves 5 byte values undefined; replace rather than raise.
+        return raw.decode("cp1252", errors="replace")
+
 
 def detect_query_column(fieldnames: Iterable[str]) -> str:
     """Pick which input column holds the restaurant query."""
@@ -102,9 +149,14 @@ def rows_to_csv(
 
 
 def read_rows(input_path: str) -> tuple[list[str], list[dict[str, str]]]:
-    """Return (fieldnames, rows) from the input CSV file."""
-    with open(input_path, newline="", encoding="utf-8-sig") as fh:
-        text = fh.read()
+    """Return (fieldnames, rows) from the input CSV file.
+
+    Decodes through `decode_csv_bytes` (UTF-8→cp1252, binary-reject) so the CLI
+    handles Excel exports and rejects spreadsheet/binary files the same way the
+    web upload does.
+    """
+    with open(input_path, "rb") as fh:
+        text = decode_csv_bytes(fh.read())
     try:
         return read_rows_from_text(text)
     except ValueError:

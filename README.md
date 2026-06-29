@@ -58,6 +58,10 @@ CSV; the CLI reads `restaurants.csv` and writes `restaurant_status.csv`.
   adding the mall, street, or neighbourhood.
 - **Duplicate rows:** identical query values are looked up once; a summary pill
   shows how many duplicate rows were skipped.
+- **File format:** upload a real `.csv`. UTF-8 is recommended, but a
+  Windows/Excel (cp1252) export with accented names is read correctly too.
+  Spreadsheet/binary files (`.xlsx`, `.xls`, PDFs, …) are rejected with a prompt
+  to export as CSV — so you don't spend API calls on a garbled file.
 - **Large files (up to ~1 000 rows):** the web app handles them automatically
   via client-side chunking (75 queries per request). If you have more than 1 000
   unique names, you'll be asked to confirm the estimated API-call cost before
@@ -145,6 +149,12 @@ A CSV with a header row. The query column is auto-detected by **priority**:
 column is used. So when more than one matches (e.g. both `query` and `name`),
 `query` wins. Override with `--query-column` (CLI only). Any extra columns you
 include are carried through to the output untouched.
+
+Both the web upload and the CLI accept UTF-8 (with or without BOM) and fall back
+to Windows-1252 (cp1252) for Excel exports, so emoji, accents (e.g. *café*), and
+non-Latin scripts (e.g. *海底捞*) are preserved. Spreadsheet/binary files
+(`.xlsx`, `.xls`, PDFs, …) are rejected with a clear message rather than read as
+garbage.
 
 ```csv
 query
